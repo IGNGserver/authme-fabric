@@ -1,0 +1,44 @@
+{
+  "schemaVersion": 1,
+  "id": "authme",
+  "version": "${version}",
+  "name": "AuthMe Fabric",
+  "description": "Authentication for offline-mode Fabric servers. Faithful Fabric port of AuthMeReloaded with a fully MySQL-compatible database backend, so a Fabric server can share one account database with a Bukkit/Spigot AuthMe instance.",
+  "authors": [
+    "AuthMe-Team (upstream AuthMeReloaded)",
+    "AuthMe Fabric port contributors"
+  ],
+  "contact": {
+    "homepage": "https://github.com/AuthMe/AuthMeReloaded",
+    "sources": "https://github.com/AuthMe/AuthMeReloaded",
+    "issues": "https://github.com/AuthMe/AuthMeReloaded/issues"
+  },
+  "license": "GPL-3.0",
+  "environment": "server",
+  "entrypoints": {
+    "server": [
+      "io.github.authme.fabric.AuthMeFabric"
+    ]
+  },
+  "mixins": [
+    "authme-legacy.mixins.json"
+  ],
+  "depends": {
+    "fabricloader": ">=0.16.0",
+    "minecraft": ">=1.19.4 <1.20.5",
+    "java": ">=17",
+    "fabric-api": "*"
+  },
+  "suggests": {
+    "luckperms": "*"
+  },
+  "custom": {
+    "modmenu": {
+      "badges": [
+        {
+          "type": "library"
+        }
+      ]
+    }
+  }
+}
