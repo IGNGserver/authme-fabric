@@ -1,176 +1,169 @@
 # AuthMe Fabric
 
-A faithful **server-side Fabric port of [AuthMeReloaded](https://github.com/AuthMe/AuthMeReloaded)** — the authentication plugin for offline-mode Minecraft servers.
+[AuthMeReloaded](https://github.com/AuthMe/AuthMeReloaded) 的 **服务端 Fabric 移植版**—— 为离线模式（offline-mode）的 Minecraft 服务器提供账号认证。
 
-AuthMe Reloaded is GPL-3.0 licensed, so this derivative port is GPL-3.0 too.
+上游 AuthMe Reloaded 采用 GPL-3.0 协议，本移植作为衍生作品同样采用 GPL-3.0。
 
-> **Why this port?** The original AuthMe is a Bukkit/Spigot/Paper/Folia plugin and does not run on Fabric.
-> This project brings the same account database, password hashing and authentication
-> workflow to Fabric servers, so you can:
-> - run a pure-Fabric offline-mode server with full password authentication, and/or
-> - keep a single shared MySQL/MariaDB/PostgreSQL account database between a Bukkit/Spigot
->   AuthMe install and a Fabric server, so player accounts stay in sync across both.
+> **为什么需要这个移植？** 原版 AuthMe 是 Bukkit/Spigot/Paper/Folia 插件，无法在 Fabric 上运行。
+> 本项目把同样的账户数据库、口令哈希和认证流程带到 Fabric 服务器，让你可以：
+> - 在纯 Fabric 离线模式服务器上获得完整的密码登录认证；
+> - 让 Bukkit/Spigot 上的 AuthMe 与 Fabric 服务器共用**同一个 MySQL / MariaDB / PostgreSQL 账户数据库**，玩家账户在两端保持同步。
 
 ---
 
-## Feature parity with AuthMe
+## 与上游 AuthMe 的功能对齐
 
-### Authentication
-- `/login`, `/register`, `/changepassword`, `/logout`, `/unregister`
-- **Session login** (skip re-login for a configurable time)
-- **Captcha** after too many failed logins (`/captcha`)
-- **2FA / TOTP** (RFC 6238, Google-Authenticator compatible) — `/2fa add`, `/2fa remove <code>`, `/2fa <code>`
-- **Email** add/show (`/email add|show`)
-- **AntiBot** rate-limiting of new connections
-- **Premium bypass** (skip password auth for Mojang-verified accounts) via `/premium` / `/freemium`, or via a verified UUID forwarded by an online-mode proxy
+### 认证
+- `/login`、`/register`、`/changepassword`、`/logout`、`/unregister`
+- **会话登录**（在配置时长内免重复登录）
+- 登录失败次数过多后的**验证码**（`/captcha`）
+- **2FA / TOTP**（RFC 6238，兼容 Google Authenticator）—— `/2fa add`、`/2fa remove <code>`、`/2fa <code>`
+- **邮箱**的添加与查看（`/email add|show`）
+- **AntiBot** 连接速率限制
+- **Premium 旁路**（让拥有 Mojang 正版账号的玩家跳过密码登录）—— `/premium` / `/freemium`，或由在线模式代理转发已验证的 UUID
 
-### Unauthenticated protection
-Unauthenticated players are sandboxed until they log in:
-- **Movement freeze** with configurable radius (cancels movement via teleport-back)
-- **Chat blocking** (chat messages from unauthenticated players are dropped)
-- **Interaction blocking** — left/right click on blocks, items, and entities is cancelled
-- **Damage blocking** — unauthenticated players cannot take damage
-- **Command allow-list** — only configured commands (default: `login`, `register`, `l`, `reg`, `authme`, `email`, `2fa`, `totp`, `captcha`) may be used; everything else is cancelled via a Brigadier `CommandDispatcher` mixin
-- **Inventory-click blocking** via a `ServerGamePacketListenerImpl#handleContainerClick` mixin (equivalent to upstream's PacketEvents-based inventory protection, but without the PacketEvents dependency)
+### 未认证玩家保护
+未登录玩家会被沙箱化，直到完成登录：
+- **移动冻结**：可配置半径，通过每 tick 传送回原位置取消移动
+- **聊天屏蔽**：未认证玩家发出的聊天消息会被丢弃
+- **交互屏蔽**：对方块 / 物品 / 实体的左键、右键交互被取消
+- **伤害屏蔽**：未认证玩家不会受到伤害
+- **命令白名单**：只能使用配置允许的命令（默认：`login`、`register`、`l`、`reg`、`authme`、`email`、`2fa`、`totp`、`captcha`），其余命令通过 Brigadier `CommandDispatcher` Mixin 直接拦截
+- **物品栏点击屏蔽**：通过 `ServerGamePacketListenerImpl#handleContainerClick` Mixin 实现（等效于上游基于 PacketEvents 的物品栏保护，但不需要 PacketEvents 依赖）
 
-### Admin commands (`/authme ...`, op-level only)
-- `register <player> <password>`
-- `unregister <player>`
-- `setpassword <player> <password>`
-- `auth <player>` / `unauth <player>` — toggle a player's authenticated state in the database
-- `accountdata <player>`
-- `reload` — reload config + messages + database connection
-- `converter list` / `converter <id> [arg]` — run an account import / migration (`sqliteToSql` is implemented; other auth plugins are listed as stubs pending schema work)
-- `backup`, `version`
+### 管理命令（`/authme ...`，仅 OP 级可用）
+- `register <玩家> <密码>`
+- `unregister <玩家>`
+- `setpassword <玩家> <密码>`
+- `auth <玩家>` / `unauth <玩家>` —— 在数据库中切换玩家的已登录状态
+- `accountdata <玩家>`
+- `reload` —— 重载配置 + 消息 + 数据库连接
+- `converter list` / `converter <id> [参数]` —— 执行账户导入 / 迁移（`sqliteToSql` 已实现；其他插件的 importer 已列表但暂为 stub）
+- `backup`、`version`
 
-### Password hashing — byte-identical to AuthMe
-Hashes computed by this port are interchangeable with the original plugin. Default is `SHA256`:
+### 口令哈希——与上游字节级一致
+本端口生成的哈希可与原版插件互用。默认 `SHA256`：
 
-| Algorithm | Status | Format |
+| 算法 | 状态 | 格式 |
 |---|---|---|
-| **SHA256** *(default)* | ✅ live | `$SHA$<salt16hex>$<sha256(sha256(pw)+salt)>` |
-| SHA512 / SHA1 / MD5 / DOUBLE_SHA512 / PLAINTEXT | ✅ live | single hash (hex) |
-| SALTEDSHA256 / SALTEDSHA512 / SALTED2MD5 | ✅ live | `hash(pw + salt)`, salt in a separate column |
-| BCRYPT (`2a`) / BCRYPT2Y (`2y`) | ✅ live | BCrypt via BouncyCastle `OpenBSDBCrypt` |
-| PBKDF2 / PBKDF2BASE64 | ✅ live | BouncyCastle `PKCS5S2ParametersGenerator` (HmacSHA256) |
-| ARGON2 / ARGON2ID | ✅ live | BouncyCastle `Argon2BytesGenerator`, PHC `$argon2i$`/`$argon2id$` format |
-| LFBCRYPT, MYBB, IPB3/4, JOOMLA, WORDPRESS, WBB3/4, PHPBB, PHPFUSION, SMF, XFBCRYPT, ROYALAUTH, CRAZYCRYPT1, CMW, MD5VB, PBKDF2DJANGO, TWO_FACTOR | 🚧 stub | listed but not implemented — tracked as a follow-up |
+| **SHA256** *(默认)* | ✅ 已实现 | `$SHA$<16位hex盐>$<sha256(sha256(pw)+盐)>` |
+| SHA512 / SHA1 / MD5 / DOUBLE_SHA512 / PLAINTEXT | ✅ 已实现 | 单哈希（hex） |
+| SALTEDSHA256 / SALTEDSHA512 / SALTED2MD5 | ✅ 已实现 | `hash(pw + 盐)`，盐存独立列 |
+| BCRYPT (`2a`) / BCRYPT2Y (`2y`) | ✅ 已实现 | BouncyCastle `OpenBSDBCrypt` |
+| PBKDF2 / PBKDF2BASE64 | ✅ 已实现 | BouncyCastle `PKCS5S2ParametersGenerator`（HmacSHA256） |
+| ARGON2 / ARGON2ID | ✅ 已实现 | BouncyCastle `Argon2BytesGenerator`，PHC `$argon2i$`/`$argon2id$` 格式 |
+| LFBCRYPT, MYBB, IPB3/4, JOOMLA, WORDPRESS, WBB3/4, PHPBB, PHPFUSION, SMF, XFBCRYPT, ROYALAUTH, CRAZYCRYPT1, CMW, MD5VB, PBKDF2DJANGO, TWO_FACTOR | 🚧 stub | 已登记但未实现——作为后续跟进项 |
 
-Plus **legacy-hash fallback with re-hash**: when a password verifies against a configured
-`settings.security.legacyHashes` algorithm, it is transparently re-hashed with the primary
-algorithm, so you can migrate hash functions with zero downtime.
+另外支持**旧哈希回退并自动重哈希**：当密码能用配置的 `settings.security.legacyHashes` 算法验证通过时，会透明地用主算法重新哈希，实现零停机哈希算法迁移。
 
 ---
 
-## Coverage matrix — pick one jar for your MC version
+## 覆盖矩阵——按 MC 版本选一个 jar
 
-The Fabric / Minecraft API drifted across versions enough that one jar cannot cover everything.
-The project is split into **modules sharing a pure-Java `authme-core`**:
+各版本间 Fabric / Minecraft API 漂移较大，单个 jar 无法通吃。项目拆成**共用一个纯 Java `authme-core`** 的多模块：
 
-| Module | Minecraft | Java | fabric.mod.json `minecraft` constraint |
+| 模块 | Minecraft | Java | fabric.mod.json `minecraft` 约束 |
 |---|---|---|---|
 | `authme-fabric` | **1.21.11** | 21 | `~1.21.11` |
 | `authme-fabric-mid` | **1.20.5 – 1.21.10** | 21 | `>=1.20.5 <1.21.11` |
 | `authme-fabric-legacy` | **1.19.4 – 1.20.4** | 17 | `>=1.19.4 <1.20.5` |
 
-> 1.16.5 – 1.19.3 are **not supported** — their pre-1.19 chat/`TextComponent` API and packet
-> surfaces would need a separate `authme-fabric-legacy-old` module.
+> **1.16.5 – 1.19.3 不支持** —— 它们使用的 pre-1.19 聊天 / `TextComponent` API 与 packet 处理差异较大，需要再拆一个独立的 `authme-fabric-legacy-old` 模块才能覆盖。
 
-All three jars share:
-- the same `authme-core` (`io.github.authme.fabric.*` packages), bundled as a Fabric **jar-in-jar**,
-- the same bundled libraries (MySQL / MariaDB / PostgreSQL / SQLite JDBC, BouncyCastle, SnakeYAML),
-- the same config file format and config directory (`<server>/config/authme/`).
+三个 jar 共用：
+- 同一个 `authme-core`（`io.github.authme.fabric.*` 包），以 Fabric **jar-in-jar** 内联，
+- 同一套运行库捆绑（MySQL / MariaDB / PostgreSQL / SQLite JDBC、BouncyCastle、SnakeYAML），
+- 同一个配置文件格式与配置目录（`<服务器>/config/authme/`）。
 
-So the **accounts database and config are 100% cross-version compatible** — you can switch jars when
-upgrading your server without migrating data.
+因此**账户数据库与配置跨版本完全兼容**——升级服务器时只需换 jar，数据无需迁移。
 
-### Why the split?
-Verified with `javap` against each target MC version's merged Mojmap jar:
-- `CommandSourceStack.hasPermission(int)` → `PermissionSet` only in **1.21.11**
-- `ResourceLocation.location()` → `Identifier.identifier()` only in **1.21.11**
-- `ServerPlayer.level()` covariantly returns `ServerLevel` from 1.21.10; in 1.20.4 you need `serverLevel()`
-- 1.20.4's `teleportTo(ServerLevel, …)` takes `Set<RelativeMovement>` and no trailing boolean; 1.21.x uses `Set<Relative>` + boolean
-- 1.20.4's `UseItemCallback.interact` returns `InteractionResultHolder<ItemStack>`; 1.21.x returns `InteractionResult`
+### 为什么要拆分？
+通过 `javap` 直接核对每个目标 MC 版本的 merged Mojmap jar：
+- `CommandSourceStack.hasPermission(int)` → `PermissionSet` 仅在 **1.21.11** 出现
+- `ResourceLocation.location()` → `Identifier.identifier()` 仅在 **1.21.11** 改名
+- `ServerPlayer.level()` 的协变返回 `ServerLevel` 从 1.21.10 才有；1.20.4 需用 `serverLevel()`
+- 1.20.4 的 `teleportTo(ServerLevel, …)` 参数为 `Set<RelativeMovement>` 且无末尾 boolean；1.21.x 改为 `Set<Relative>` + boolean
+- 1.20.4 的 `UseItemCallback.interact` 返回 `InteractionResultHolder<ItemStack>`；1.21.x 改为 `InteractionResult`
 
 ---
 
-## Databases — and the "shared with Spigot AuthMe" trick
+## 数据库——以及"与 Spigot AuthMe 共用账户"
 
-Supported backends (`DataSource.backend` in `config.yml`):
+支持的后端（`config.yml` 中的 `DataSource.backend`）：
 
-| Backend | Status | Notes |
+| 后端 | 状态 | 说明 |
 |---|---|---|
-| **MySQL** | ✅ | Creates the *exact* AuthMe table schema (configurable column names, `MEDIUMINT(8) UNSIGNED AUTO_INCREMENT`, `password ascii_bin`, `isLogged`/`hasSession`/`regdate`/`totp`/`premiumUUID`, …) |
-| **MariaDB** | ✅ | Same schema, MariaDB JDBC driver |
-| **PostgreSQL** | ✅ | AuthMe-shape schema with PG type mappings (`SERIAL`, `DOUBLE PRECISION`, `REAL`, `COLLATE "C"` in place of MySQL `ascii_bin`) |
-| **SQLite** | ✅ | Local file under `config/authme/`; bundled `sqlite-jdbc` driver |
+| **MySQL** | ✅ | 建出**与 AuthMe 完全一致**的表结构（可配置列名、`MEDIUMINT(8) UNSIGNED AUTO_INCREMENT` 主键、`password ascii_bin`、`isLogged`/`hasSession`/`regdate`/`totp`/`premiumUUID` 等列） |
+| **MariaDB** | ✅ | 同表结构，走 MariaDB JDBC 驱动 |
+| **PostgreSQL** | ✅ | 同结构 + PG 类型适配（`SERIAL`、`DOUBLE PRECISION`、`REAL`，用 `COLLATE "C"` 代替 MySQL `ascii_bin` 实现字节级区分） |
+| **SQLite** | ✅ | 本地文件位于 `config/authme/` 下；已捆绑 `sqlite-jdbc` 驱动 |
 
-**Sharing one account database with a Bukkit/Spigot AuthMe install:**
-1. Configure the **same** MySQL/MariaDB/PostgreSQL connection (host, port, database, table, username, password) in both `config.yml` files.
-2. Use the **same** column names — the defaults already match upstream AuthMe (`username`, `realname`, `password`, `ip`, `lastlogin`, `regdate`, `isLogged`, `hasSession`, `totp`, `premiumUUID`, …).
-3. Use the **same** `settings.security.passwordHash` (default `SHA256`).
-4. The two servers can now read/write the same account rows; hashes are byte-identical, so a player registered on the Spigot side can log in on the Fabric side, and vice versa.
+**让 Bukkit/Spigot AuthMe 与本端口共用一个账户数据库：**
+1. 两份 `config.yml` 配**同一** MySQL/MariaDB/PostgreSQL 连接（主机、端口、库、表名、用户名、密码）。
+2. 使用**一致**的列名——默认值已经与 AuthMe 对齐（`username`、`realname`、`password`、`ip`、`lastlogin`、`regdate`、`isLogged`、`hasSession`、`totp`、`premiumUUID` 等）。
+3. 使用**同一个** `settings.security.passwordHash`（默认 `SHA256`）。
+4. 两端服务器即可读写同一账户行；哈希字节级一致，在 Spigot 端注册的玩家可以直接在 Fabric 端登录，反之亦然。
 
-> ✅ Default config (`mySQLColumnSalt: ''`) matches upstream SHA256 (salt embedded in the hash).
-> If you use a separate-salt algorithm (`SALTEDSHA256/512`, `SALTED2MD5`), set `mySQLColumnSalt` to the same value your AuthMe uses.
+> ✅ 默认配置（`mySQLColumnSalt: ''`）与上游 SHA256 对齐（盐嵌入哈希）。
+> 如果使用带独立盐列的算法（`SALTEDSHA256/512`、`SALTED2MD5`），把 `mySQLColumnSalt` 设成与你 AuthMe 一致的列名即可。
 
-`MySQLDataSource` also runs `ALTER TABLE … ADD COLUMN` for any missing AuthMe column on startup, so pointing this port at a database created by the original plugin will not break it.
+`MySQLDataSource` 启动时还会对缺失的 AuthMe 列做 `ALTER TABLE … ADD COLUMN`，所以把本端口指向原版插件已建好的数据库不会破坏它。
 
-### Account converters
-`/authme converter list` and `/authme converter <id> [arg]`:
-- `sqliteToSql <path>` — copy all accounts from an AuthMe SQLite file into your configured SQL backend (**implemented**)
-- `authplus`, `librelogin`, `limboauth`, `nlogin`, `openlogin`, `tiauth`, `nexauth`, `mysqlToSqlite` — listed as **stubs** pending schema-specific readers
+### 账户转换器
+`/authme converter list` 与 `/authme converter <id> [参数]`：
+- `sqliteToSql <路径>` —— 把一个 AuthMe SQLite 文件中的全部账户复制到你当前配置的 SQL 后端（**已实现**）
+- `authplus`、`librelogin`、`limboauth`、`nlogin`、`openlogin`、`tiauth`、`nexauth`、`mysqlToSqlite` —— 已登记为 **stub**，待补对应 schema 读取
 
 ---
 
-## Requirements
+## 运行要求
 
-| Component | Required version |
+| 组件 | 版本要求 |
 |---|---|
 | Minecraft | 1.19.4 – 1.21.11 |
-| Fabric Loader | ≥ 0.16.0 (built against 0.19.3) |
-| Fabric API | any (built against the per-module pinned version) |
-| Java | 21 for `authme-fabric` / `-mid`, 17 for `-legacy` |
-| Optional proxy | `authme-velocity` or `authme-bungee` for premium bypass when behind an offline-mode proxy |
+| Fabric Loader | ≥ 0.16.0（构建基于 0.19.3） |
+| Fabric API | 任意版本（构建基于各模块的 pin 版本） |
+| Java | `authme-fabric` / `-mid` 需 21，`-legacy` 需 17 |
+| 可选代理 | 离线模式代理后端时，需要 `authme-velocity` 或 `authme-bungee` 以实现 premium 旁路 |
 
-There are **no external plugin/runtime dependencies** at runtime — JDBC drivers, BouncyCastle and SnakeYAML are all bundled as Fabric jar-in-jar inside each module's jar.
+**运行时无任何外部依赖**——JDBC 驱动、BouncyCastle、SnakeYAML 全部以 Fabric jar-in-jar 形式打进每个模块的 jar 内。
 
 ---
 
-## Build
+## 构建
 
-Requires JDK 21 and internet access (Loom downloads Minecraft + Mojmap mappings on first run):
+需要 JDK 21，以及首次运行时联网（Loom 会下载 Minecraft + Mojmap 映射）：
 
 ```bash
 ./gradlew clean build
 ```
 
-Produces three jars:
+会得到三个 jar：
 - `authme-fabric/build/libs/authme-fabric-6.0.1-SNAPSHOT.jar`
 - `authme-fabric-mid/build/libs/authme-fabric-mid-6.0.1-SNAPSHOT.jar`
 - `authme-fabric-legacy/build/libs/authme-fabric-legacy-6.0.1-SNAPSHOT.jar`
 
-(Plus matching `-sources.jar` for each.)
+（每个还有对应的 `-sources.jar`。）
 
-To build only one module: `./gradlew :authme-fabric-mid:build` etc.
+只构建某个模块：`./gradlew :authme-fabric-mid:build` 等。
 
 ---
 
-## Install & configure
+## 安装与配置
 
-1. Pick the jar matching your MC version (see the coverage matrix).
-2. Drop it into your server's `mods/` folder along with Fabric API.
-3. Start the server once — this generates `config/authme/config.yml` and `config/authme/messages.yml`.
-4. Stop the server and edit `config.yml`:
-   - `DataSource.backend` — `SQLITE` (default) or `MYSQL` / `MARIADB` / `POSTGRESQL`
-   - For SQL backends: `mySQLHost`, `mySQLPort`, `mySQLDatabase`, `mySQLTablename`, credentials, etc. **Match these to your existing AuthMe config to share accounts.**
-   - `settings.security.passwordHash` (default `SHA256`) — use the same one as your existing AuthMe
-   - `Settings.restrictUnauthenticated.allowCommands` — commands usable before login
-   - `settings.session.enabled` / `timeout` — session login
-   - `Security.captcha.*`, `Security.tempban.*` — brute-force protection
-5. Restart. Done.
+1. 按你的 MC 版本选择对应 jar（见覆盖矩阵）。
+2. 把它和 Fabric API 一起放进 `mods/` 目录。
+3. 启动一次服务器——会自动生成 `config/authme/config.yml` 与 `config/authme/messages.yml`。
+4. 停服，编辑 `config.yml`：
+   - `DataSource.backend` —— `SQLITE`（默认）或 `MYSQL` / `MARIADB` / `POSTGRESQL`
+   - SQL 后端：`mySQLHost`、`mySQLPort`、`mySQLDatabase`、`mySQLTablename`、凭据等。**与原 AuthMe 配置保持一致即可共享账户。**
+   - `settings.security.passwordHash`（默认 `SHA256`）—— 与现有 AuthMe 使用同一个值
+   - `Settings.restrictUnauthenticated.allowCommands` —— 登录前可用的命令
+   - `settings.session.enabled` / `timeout` —— 会话登录
+   - `Security.captcha.*`、`Security.tempban.*` —— 暴力破解防护
+5. 重启服务器，完成。
 
-### Key config keys (compatible with AuthMe's `config.yml`)
+### 关键配置项（与 AuthMe 的 config.yml 兼容）
 
 ```yaml
 DataSource:
@@ -181,10 +174,10 @@ DataSource:
   mySQLTablename: authme
   mySQLUsername: authme
   mySQLPassword: '...'
-  # Keep these column names identical to your existing AuthMe config:
+  # 与你现有 AuthMe 配置保持列名一致：
   mySQLColumnName: username
   mySQLColumnPassword: password
-  mySQLColumnSalt: ''          # '' for SHA256 (salt embedded); set for salted algorithms
+  mySQLColumnSalt: ''          # '' 代表 SHA256（盐嵌入）；带独立盐列的算法需设该列名
   mySQLColumnIp: ip
   mySQLColumnLastLogin: lastlogin
   mySQLColumnRegisterDate: regdate
@@ -195,10 +188,10 @@ DataSource:
 
 settings:
   security:
-    passwordHash: SHA256       # the SAME value your Spigot AuthMe uses
+    passwordHash: SHA256       # 与你的 Spigot AuthMe 同值
     minPasswordLength: 5
     passwordMaxLength: 30
-    # legacyHashes: [SHA1]    # optional fallback / auto-rehash migration
+    # legacyHashes: [SHA1]    # 可选旧哈希回退 / 自动重哈希迁移
   session:
     enabled: false
     timeout: 60
@@ -206,120 +199,110 @@ settings:
 
 ---
 
-## Commands (player)
+## 命令（玩家侧）
 
-| Command | Alias | Purpose |
+| 命令 | 别名 | 用途 |
 |---|---|---|
-| `/login <password>` | `/l` | Log in |
-| `/register <pw> <pw>` | `/reg` | Register |
-| `/changepassword <old> <new>` | `/changepass` | Change password (must be logged in) |
-| `/logout` | — | Log out |
-| `/unregister <password>` | — | Delete your account |
-| `/captcha <code>` | — | Solve captcha |
-| `/2fa <code>` | `/totp` | Verify 2FA code |
-| `/2fa add` | — | Enable 2FA (prints secret + otpauth URI) |
-| `/2fa remove <code>` | — | Disable 2FA |
-| `/email add <email> <email>` | — | Add an email |
-| `/email show` | — | Show email |
-| `/premium` | — | Enable premium (Mojang) bypass for this account |
-| `/freemium` | — | Disable premium bypass for this account |
+| `/login <密码>` | `/l` | 登录 |
+| `/register <密码> <密码>` | `/reg` | 注册 |
+| `/changepassword <旧密码> <新密码>` | `/changepass` | 修改密码（需已登录） |
+| `/logout` | — | 登出 |
+| `/unregister <密码>` | — | 注销自己的账号 |
+| `/captcha <验证码>` | — | 输入验证码 |
+| `/2fa <code>` | `/totp` | 验证 2FA 码 |
+| `/2fa add` | — | 启用 2FA（会打印密钥 + otpauth URI） |
+| `/2fa remove <code>` | — | 关闭 2FA |
+| `/email add <邮箱> <邮箱>` | — | 添加邮箱 |
+| `/email show` | — | 查看邮箱 |
+| `/premium` | — | 为本账号启用 premium（正版）旁路 |
+| `/freemium` | — | 为本账号关闭 premium 旁路 |
 
 ---
 
-## Permissions
+## 权限
 
-- Player commands: open to all (AuthMe enforces authentication state itself)
-- Admin commands (`/authme ...`): gated by the server's op-level permission
-  - on `authme-fabric` (1.21.11) — `PermissionSet.ALL_PERMISSIONS`
-  - on `-mid` / `-legacy` — `CommandSourceStack.hasPermission(3)` (op level ≥ 3)
+- 玩家命令：全部开放（AuthMe 自己通过登录状态约束）
+- 管理命令（`/authme ...`）：由服务器的 OP 级权限把关
+  - `authme-fabric`（1.21.11）—— `PermissionSet.ALL_PERMISSIONS`
+  - `-mid` / `-legacy` —— `CommandSourceStack.hasPermission(3)`（OP 等级 ≥ 3）
 
 ---
 
-## How it protects unauthenticated players
+## 它如何对未登录玩家实施保护
 
-| Action | Mech |
+| 玩家行为 | 防护机制 |
 |---|---|
-| Walking / falling out of the join spot | Per-tick teleport-back to the frozen join location (cancels delta movement) |
-| Sending a chat message | `ServerMessageEvents.ALLOW_CHAT_MESSAGE` returns false |
-| Left / right click on block or entity; using an item | `AttackBlockCallback` / `UseBlockCallback` / `UseEntityCallback` / `AttackEntityCallback` / `UseItemCallback` return `FAIL` |
-| Taking damage | `ServerLivingEntityEvents.ALLOW_DAMAGE` returns false |
-| Clicking inside an inventory | `ContainerClickMixin` cancels `ServerGamePacketListenerImpl#handleContainerClick` at HEAD |
-| Running a disallowed command | `CommandDispatcherMixin` cancels `CommandDispatcher#execute(...)` at HEAD unless the command root is in `allowCommands` |
-| Joining with a name that's registered to a premium account | (when `enablePremium: true`) Skips password login, learns the verified Mojang UUID from the proxy or `premiumUUID` column |
-| Bot-style connection spam | `AntiBotManager` blocks new joins once a configured rate threshold is exceeded |
+| 走出 / 掉出生点 | 每 tick 传送回冻结的加入点（取消 delta movement） |
+| 发送聊天消息 | `ServerMessageEvents.ALLOW_CHAT_MESSAGE` 返回 false |
+| 左/右键点击方块或实体、使用物品 | `AttackBlockCallback` / `UseBlockCallback` / `UseEntityCallback` / `AttackEntityCallback` / `UseItemCallback` 返回 `FAIL` |
+| 受到伤害 | `ServerLivingEntityEvents.ALLOW_DAMAGE` 返回 false |
+| 在物品栏内点击 | `ContainerClickMixin` 在 HEAD 处取消 `ServerGamePacketListenerImpl#handleContainerClick` |
+| 执行不在白名单的命令 | `CommandDispatcherMixin` 在 HEAD 处取消 `CommandDispatcher#execute(...)`，除非命令根在 `allowCommands` 中 |
+| 用已注册到 premium 账号的名字加入 | （当 `enablePremium: true`）跳过密码登录，从代理或 `premiumUUID` 列获取已验证的 Mojang UUID |
+| 机器人式连接刷屏 | `AntiBotManager` 在达到配置阈值后拦截新加入请求 |
 
-### What is NOT ported from upstream
-- **Pre-join dialog UI** (paper-only, complex client-protocol work)
-- **Email recovery / verification flow** (email sending is not bundled)
-- **Country whitelist/blacklist** (MaxMind GeoIP viewer)
-- **Account importers for Auth+/LibreLogin/LimboAuth/nLogin/OpeNLogin/tiAuth/NexAuth** (stubs only)
-- **`/authme backup`** (command exists but does not yet write a `.tar` of the database)
-- 1.16.5 – 1.19.3 support
+### 本版未从上游移植的功能
+- **pre-join dialog UI**（paper 专有、涉及复杂客户端协议工作）
+- **邮件恢复 / 验证流程**（未内置 SMTP 客户端）
+- **国家级白名单 / 黑名单**（MaxMind GeoIP 查询）
+- **Auth+ / LibreLogin / LimboAuth / nLogin / OpeNLogin / tiAuth / NexAuth 的账户导入**（仅 stub）
+- **`/authme backup`**（命令已存在，但暂未写 tar 备份）
+- 1.16.5 – 1.19.3 支持
 
 ---
 
-## Architecture
+## 架构
 
 ```
-authme-core/                   # pure Java 17 — no Minecraft dependency
+authme-core/                   # 纯 Java 17 —— 不依赖 Minecraft
   src/main/java/io/github/authme/fabric/
-    security/                   # hashing (SHA256/BCrypt/PBKDF2/Argon2/…)
-    datasource/                 # MySQL/MariaDB/PostgreSQL/SQLite + connection pool
-    converter/                  # account importers (sqliteToSql live, others stubbed)
-    totp/                       # RFC 6238 TOTP client
-    config/                     # YAML config + messages (SnakeYAML)
-    antibot/                    # rate-limit
-    auth/                       # PlayerSession (pure data, no ServerPlayer ref)
-    util/Log.java               # pluggable Log.Sink (log4j keeps in platform module)
-authme-fabric/                 # 1.21.11, Java 21, Identifier + PermissionSet
-authme-fabric-mid/             # 1.20.5–1.21.10, Java 21, ResourceLocation + hasPermission
-authme-fabric-legacy/          # 1.19.4–1.20.4, Java 17, RelativeMovement
-                               # each platform module has: AuthMe, AuthManager,
-                               # AuthMeFabric, AuthMeCommands, AuthMeEvents,
-                               # MinecraftText, ContainerClickMixin, CommandDispatcherMixin
+    security/                   # 哈希（SHA256/BCrypt/PBKDF2/Argon2/…）
+    datasource/                 # MySQL/MariaDB/PostgreSQL/SQLite + 连接池
+    converter/                  # 账户导入（sqliteToSql 已实现，其他为 stub）
+    totp/                       # RFC 6238 TOTP 客户端
+    config/                     # YAML 配置 + 消息（SnakeYAML）
+    antibot/                    # 速率限制
+    auth/                       # PlayerSession（纯数据，不引用 ServerPlayer）
+    util/Log.java               # 可插拔 Log.Sink（log4j 留在平台模块）
+authme-fabric/                 # 1.21.11，Java 21，Identifier + PermissionSet
+authme-fabric-mid/             # 1.20.5–1.21.10，Java 21，ResourceLocation + hasPermission
+authme-fabric-legacy/          # 1.19.4–1.20.4，Java 17，RelativeMovement
+                               # 每个平台模块都包含：AuthMe、AuthManager、
+                               # AuthMeFabric、AuthMeCommands、AuthMeEvents、
+                               # MinecraftText、ContainerClickMixin、CommandDispatcherMixin
 ```
 
-Each platform module bundles `authme-core` and the bundled libraries (MySQL/MariaDB/PostgreSQL/SQLite
-JDBC, BouncyCastle, SnakeYAML) as Fabric **jar-in-jar** — no user-side runtime dependencies.
+每个平台模块都会把 `authme-core` 与捆绑库（MySQL/MariaDB/PostgreSQL/SQLite JDBC、BouncyCastle、SnakeYAML）作为 Fabric **jar-in-jar** 内嵌——用户侧无需任何运行时依赖。
 
 ---
 
-## License
+## 许可证
 
 ```
 AuthMe Fabric
-Copyright (C) since 2026 AuthMe Fabric port contributors
-Copyright (C) since 2013 AuthMe-Team (upstream AuthMeReloaded)
+Copyright (C) 自 2026 起 AuthMe Fabric 移植贡献者
+Copyright (C) 自 2013 起 AuthMe-Team（上游 AuthMeReloaded）
 
-This program is free software: you can redistribute it and/or modify
-it under the terms of the GNU General Public License as published by
-the Free Software Foundation, either version 3 of the License, or
-(at your option) any later version.
+本程序为自由软件：你可依据自由软件基金会发布的 GPLv3（或更高版本）重新分发与修改它。
 
-This program is distributed in the hope that it will be useful,
-but WITHOUT ANY WARRANTY; without even the implied warranty of
-MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-GNU General Public License for more details.
+本程序以期有用而发布，但不提供任何担保；亦不对其适销性或特定用途适用性作任何默示担保。
+详见 GNU 通用公共许可证以获取更多信息。
 ```
 
-See [`LICENSE`](LICENSE) for the full GPLv3 text.
+完整 GPLv3 文本见 [`LICENSE`](LICENSE)。
 
-Upstream: [`AuthMe/AuthMeReloaded`](https://github.com/AuthMe/AuthMeReloaded) — please go star
-the original project, without which this port would not exist.
+上游：[`AuthMe/AuthMeReloaded`](https://github.com/AuthMe/AuthMeReloaded)—— 请给原项目点个 star，没有它就没有本移植。
 
 ---
 
-## Acknowledgements
+## 致谢
 
-- **AuthMe-Team** — upstream authors and ongoing maintainers of AuthMeReloaded.
-- **FabricMC** — Loom, Fabric Loader and Fabric API.
-- **BouncyCastle** — BCrypt / PBKDF2 / Argon2 implementation.
-- **xerial** — `sqlite-jdbc` driver.
-- All the upstream AuthMe translators and contributors.
+- **AuthMe-Team** —— 上游 AuthMeReloaded 的作者与持续维护者。
+- **FabricMC** —— Loom、Fabric Loader 与 Fabric API。
+- **BouncyCastle** —— BCrypt / PBKDF2 / Argon2 实现。
+- **xerial** —— `sqlite-jdbc` 驱动。
+- 上游 AuthMe 的所有翻译者与贡献者。
 
-## Issues / contributing
+## 问题 / 贡献
 
-This is a derivative port; bugs introduced by the port are this project's responsibility — please
-file them on [this repo's issue tracker](issues). For upstream AuthMe behaviour / hashing questions,
-the [upstream issue tracker](https://github.com/AuthMe/AuthMeReloaded/issues) is still the canonical
-place.
+本仓库是衍生移植版本；移植本身引入的 bug 请提到[本仓库的 issue 跟踪器](issues)。关于上游 AuthMe 行为 / 哈希算法的问题，仍以[上游 issue 跟踪器](https://github.com/AuthMe/AuthMeReloaded/issues)为准。
