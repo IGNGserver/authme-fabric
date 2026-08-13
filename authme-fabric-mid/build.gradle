@@ -1,0 +1,81 @@
+plugins {
+    id 'net.fabricmc.fabric-loom-remap' version "${loom_version}"
+    id 'java'
+}
+
+// Mid coverage: Minecraft 1.20.5 through 1.21.10 (Java 21, ResourceLocation + hasPermission(int)).
+// Pinned to 1.21.10 for compilation; runs on the 1.21.10-line Servers via Fabric API.
+base {
+    archivesName = 'authme-fabric-mid'
+}
+
+loom {
+    mods {
+        "authme" {
+            sourceSet sourceSets.main
+        }
+    }
+}
+
+// Provide per-module pins; the shared Loom plugin version + Loader version are reused.
+ext {
+    midMinecraft = '1.21.10'
+    midLoader    = '0.19.3'
+    midFabricApi = '0.138.4+1.21.10'
+}
+
+dependencies {
+    minecraft "com.mojang:minecraft:${project.midMinecraft}"
+    mappings loom.officialMojangMappings()
+
+    modImplementation "net.fabricmc:fabric-loader:${project.midLoader}"
+    modImplementation "net.fabricmc.fabric-api:fabric-api:${project.midFabricApi}"
+
+    // Pure-Java shared core, inlined as a Fabric jar-in-jar.
+    implementation project(':authme-core')
+    include      project(':authme-core')
+
+    // Bundled runtime libraries.
+    implementation "com.mysql:mysql-connector-j:${project.mysql_version}"
+    include      "com.mysql:mysql-connector-j:${project.mysql_version}"
+
+    implementation "org.mariadb.jdbc:mariadb-java-client:${project.mariadb_version}"
+    include      "org.mariadb.jdbc:mariadb-java-client:${project.mariadb_version}"
+
+    implementation "org.postgresql:postgresql:${project.postgresql_version}"
+    include      "org.postgresql:postgresql:${project.postgresql_version}"
+
+    implementation "org.bouncycastle:bcprov-jdk18on:${project.bouncycastle_version}"
+    include      "org.bouncycastle:bcprov-jdk18on:${project.bouncycastle_version}"
+
+    implementation "org.xerial:sqlite-jdbc:${project.sqlite_version}"
+    include      "org.xerial:sqlite-jdbc:${project.sqlite_version}"
+
+    implementation "org.yaml:snakeyaml:${project.snakeyaml_version}"
+    include      "org.yaml:snakeyaml:${project.snakeyaml_version}"
+}
+
+processResources {
+    inputs.property "version", project.version
+
+    filesMatching("fabric.mod.json") {
+        expand "version": project.version
+    }
+}
+
+tasks.withType(JavaCompile).configureEach {
+    it.options.release = 21
+    it.options.encoding = 'UTF-8'
+}
+
+java {
+    sourceCompatibility = JavaVersion.VERSION_21
+    targetCompatibility = JavaVersion.VERSION_21
+    withSourcesJar()
+}
+
+jar {
+    from("LICENSE") {
+        rename { "${it}_authme-fabric-mid" }
+    }
+}
