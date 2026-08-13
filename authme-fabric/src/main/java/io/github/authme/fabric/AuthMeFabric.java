@@ -3,6 +3,7 @@ package io.github.authme.fabric;
 import io.github.authme.fabric.command.AuthMeCommands;
 import io.github.authme.fabric.events.AuthMeEvents;
 import io.github.authme.fabric.util.Log;
+import io.github.authme.fabric.util.Log4jLogSink;
 
 import net.fabricmc.api.ModInitializer;
 import net.fabricmc.fabric.api.command.v2.CommandRegistrationCallback;
@@ -17,6 +18,7 @@ public final class AuthMeFabric implements ModInitializer {
 
     @Override
     public void onInitialize() {
+        Log.setSink(new Log4jLogSink());
         AuthMe.require(); // create the singleton holder early
 
         CommandRegistrationCallback.EVENT.register(AuthMeCommands::register);

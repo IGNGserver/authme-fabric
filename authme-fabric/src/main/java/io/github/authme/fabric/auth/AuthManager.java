@@ -3,6 +3,8 @@ package io.github.authme.fabric.auth;
 import io.github.authme.fabric.AuthMe;
 import io.github.authme.fabric.antibot.AntiBotManager;
 import io.github.authme.fabric.config.AuthMeConfig;
+import io.github.authme.fabric.converter.Converter;
+import io.github.authme.fabric.converter.Converters;
 import io.github.authme.fabric.datasource.DataSource;
 import io.github.authme.fabric.datasource.PlayerAuth;
 import io.github.authme.fabric.security.PasswordSecurity;
@@ -534,6 +536,29 @@ public final class AuthManager {
             }
             executeMain(onComplete);
         });
+    }
+
+    public void adminConverter(String id, String argument, java.util.function.BiConsumer<Integer, String> reply) {
+        CompletableFuture.supplyAsync(() -> {
+            Converter c = Converters.build(id, argument);
+            if (c == null) return null;
+            try {
+                return c.convert(ds());
+            } catch (Exception e) {
+                Log.error("Converter '" + id + "' failed", e);
+                Converter.Result r = new Converter.Result(0, 0, "Error: " + e.getMessage());
+                return r;
+            }
+        }).thenAccept(r -> executeMain(() -> {
+            if (r == null) {
+                reply.accept(0, "&cUnknown converter: " + id + ". Run &e/authme converter list&c.");
+            } else if (r.getNote().equalsIgnoreCase("not implemented in this fabric port yet. tracked as a known limitation.")) {
+                reply.accept(0, "&e" + id + "&7: " + r.getNote());
+            } else {
+                String note = r.getNote().isEmpty() ? "" : " (" + r.getNote() + ")";
+                reply.accept(r.getImported(), "&2Imported &a" + r.getImported() + "&2, skipped &a" + r.getSkipped() + note);
+            }
+        }));
     }
 
     // ===================================================================== queries used by events / mixin

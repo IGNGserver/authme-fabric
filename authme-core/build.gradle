@@ -1,0 +1,30 @@
+plugins {
+    id 'java-library'
+}
+
+base {
+    archivesName = 'authme-core'
+}
+
+java {
+    sourceCompatibility = JavaVersion.VERSION_21
+    targetCompatibility = JavaVersion.VERSION_21
+    withSourcesJar()
+}
+
+tasks.withType(JavaCompile).configureEach {
+    it.options.release = 21
+}
+
+dependencies {
+    // SnakeYAML: pure runtime/compile dep; at runtime provided by each platform module's jar-in-jar.
+    api "org.yaml:snakeyaml:${rootProject.snakeyaml_version}"
+    // BouncyCastle: used by Argon2/BCrypt/PBKDF2 hash implementations.
+    api "org.bouncycastle:bcprov-jdk18on:${rootProject.bouncycastle_version}"
+}
+
+jar {
+    from(rootProject.file("LICENSE")) {
+        rename { "${it}_authme-core" }
+    }
+}

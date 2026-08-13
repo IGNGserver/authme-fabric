@@ -66,7 +66,7 @@ email.invalid: '&cInvalid email address!'
 email.noMatch: '&cYour emails did not match!'
 
 # --- admin (authme) ---
-admin.usage: '&cAuthMe admin commands: register, unregister, setpassword, reload, version, auth, unauth, accountdata, backup'
+admin.usage: '&cAuthMe admin commands: register, unregister, setpassword, reload, version, auth, unauth, accountdata, backup, converter'
 admin.registered: '&2Player &a{player}&2 registered successfully.'
 admin.unregistered: '&2Player &a{player}&2 has been unregistered.'
 admin.setpassword: '&2Password changed for player &a{player}.'

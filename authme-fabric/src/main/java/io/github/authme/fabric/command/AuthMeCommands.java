@@ -238,6 +238,15 @@ public final class AuthMeCommands {
                 reply(ctx, "&aAuthMe Fabric&7v6.0.1 &a- Fabric port of AuthMeReloaded (GPL-3.0).");
                 return 1;
             }))
+            .then(Commands.literal("converter")
+                .then(Commands.literal("list").executes(ctx -> {
+                    reply(ctx, io.github.authme.fabric.converter.Converters.listing());
+                    return 1;
+                }))
+                .then(Commands.argument("id", StringArgumentType.word())
+                    .executes(ctx -> adminConverter(ctx, null))
+                    .then(Commands.argument("arg", StringArgumentType.greedyString())
+                        .executes(ctx -> adminConverter(ctx, StringArgumentType.getString(ctx, "arg"))))))
             .executes(ctx -> { reply(ctx, AuthMe.get().message("admin.usage")); return 0; }));
     }
 
@@ -275,6 +284,13 @@ public final class AuthMeCommands {
         AuthManager m = checkMgr(ctx); if (m == null) return 0;
         String target = StringArgumentType.getString(ctx, "player").toLowerCase(java.util.Locale.ROOT);
         m.adminUnauth(target, () -> reply(ctx, AuthMe.get().message("admin.unauthed", "player", target)));
+        return 1;
+    }
+
+    private static int adminConverter(CommandContext<CommandSourceStack> ctx, String argument) {
+        AuthManager m = checkMgr(ctx); if (m == null) return 0;
+        String id = StringArgumentType.getString(ctx, "id").toLowerCase(java.util.Locale.ROOT);
+        m.adminConverter(id, argument, (count, message) -> reply(ctx, message));
         return 1;
     }
 

@@ -10,3 +10,5 @@ pluginManagement {
 }
 
 rootProject.name = 'authme-fabric'
+include 'authme-core'
+include 'authme-fabric'

@@ -1,11 +1,9 @@
 package io.github.authme.fabric.auth;
 
-import net.minecraft.server.level.ServerPlayer;
-
 import java.util.UUID;
 
 /**
- * In-memory per-player session state held between login events.
+ * In-memory per-player session state held between login events. Pure data — no platform types.
  */
 public final class PlayerSession {
 
@@ -22,6 +20,7 @@ public final class PlayerSession {
     public String lastIp;
     public long lastLogin;
     public String totpKey = "";
+    public boolean invulnerableFrozen;
     public double frozenX, frozenY, frozenZ;
     public String frozenWorld;
 
@@ -36,10 +35,5 @@ public final class PlayerSession {
 
     public boolean needsTotp() {
         return pendingTotp;
-    }
-
-    /** Convenience for tick-based freeze: true if the player must be locked to their join location. */
-    public boolean mustFreeze(ServerPlayer player) {
-        return isUnauthenticated();
     }
 }

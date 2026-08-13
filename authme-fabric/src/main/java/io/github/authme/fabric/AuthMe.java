@@ -8,6 +8,7 @@ import io.github.authme.fabric.datasource.DataSource;
 import io.github.authme.fabric.datasource.DbSettings;
 import io.github.authme.fabric.datasource.MariaDBDataSource;
 import io.github.authme.fabric.datasource.MySQLDataSource;
+import io.github.authme.fabric.datasource.PostgreSqlDataSource;
 import io.github.authme.fabric.datasource.SQLiteDataSource;
 import io.github.authme.fabric.security.PasswordSecurity;
 import io.github.authme.fabric.util.Log;
@@ -110,10 +111,8 @@ public final class AuthMe {
         switch (s.backend) {
             case MYSQL: return new MySQLDataSource(s);
             case MARIADB: return new MariaDBDataSource(s);
+            case POSTGRESQL: return new PostgreSqlDataSource(s);
             case SQLITE: return new SQLiteDataSource(s);
-            case POSTGRESQL:
-                Log.warn("PostgreSQL backend is not implemented in this Fabric port yet; falling back to SQLite.");
-                return new SQLiteDataSource(s);
             default: return new SQLiteDataSource(s);
         }
     }

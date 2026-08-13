@@ -1,0 +1,71 @@
+plugins {
+    id 'net.fabricmc.fabric-loom-remap' version "${loom_version}"
+    id 'java'
+}
+
+base {
+    archivesName = 'authme-fabric'
+}
+
+loom {
+    mods {
+        "authme" {
+            sourceSet sourceSets.main
+        }
+    }
+}
+
+dependencies {
+    minecraft "com.mojang:minecraft:${project.minecraft_version}"
+    mappings loom.officialMojangMappings()
+
+    modImplementation "net.fabricmc:fabric-loader:${project.loader_version}"
+    modImplementation "net.fabricmc.fabric-api:fabric-api:${project.fabric_api_version}"
+
+    // Pure-Java shared core, inlined as a Fabric jar-in-jar.
+    implementation project(':authme-core')
+    include      project(':authme-core')
+
+    // Database drivers + crypto + yaml, bundled as Fabric jar-in-jar.
+    implementation "com.mysql:mysql-connector-j:${project.mysql_version}"
+    include      "com.mysql:mysql-connector-j:${project.mysql_version}"
+
+    implementation "org.mariadb.jdbc:mariadb-java-client:${project.mariadb_version}"
+    include      "org.mariadb.jdbc:mariadb-java-client:${project.mariadb_version}"
+
+    implementation "org.postgresql:postgresql:${project.postgresql_version}"
+    include      "org.postgresql:postgresql:${project.postgresql_version}"
+
+    implementation "org.bouncycastle:bcprov-jdk18on:${project.bouncycastle_version}"
+    include      "org.bouncycastle:bcprov-jdk18on:${project.bouncycastle_version}"
+
+    implementation "org.xerial:sqlite-jdbc:${project.sqlite_version}"
+    include      "org.xerial:sqlite-jdbc:${project.sqlite_version}"
+
+    implementation "org.yaml:snakeyaml:${project.snakeyaml_version}"
+    include      "org.yaml:snakeyaml:${project.snakeyaml_version}"
+}
+
+processResources {
+    inputs.property "version", project.version
+
+    filesMatching("fabric.mod.json") {
+        expand "version": project.version
+    }
+}
+
+tasks.withType(JavaCompile).configureEach {
+    it.options.release = 21
+}
+
+java {
+    sourceCompatibility = JavaVersion.VERSION_21
+    targetCompatibility = JavaVersion.VERSION_21
+    withSourcesJar()
+}
+
+jar {
+    from("LICENSE") {
+        rename { "${it}_authme-fabric" }
+    }
+}
