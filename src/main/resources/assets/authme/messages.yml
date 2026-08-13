@@ -1,0 +1,89 @@
+# AuthMe Fabric messages. Replace `&` colour codes are supported.
+# Copy this file to messages_<locale>.yml to provide player-language overrides.
+
+# --- login ---
+login.usage: '&cUsage: /login <password>'
+login.success: '&2Successfully logged in!'
+login.wrong: '&cWrong password!'
+login.timeout: '&cYou took too long to log in and have been disconnected.'
+login.prompt: '&aWelcome! Please log in with &c/login <password>&a.'
+login.already: '&cYou are already logged in!'
+login.success_session: '&2You have been logged in via your previous session.'
+login.notRegistered: '&cYou are not registered yet. Use &c/register <password> <password>.'
+
+# --- registration ---
+reg.usage: '&cUsage: /register <password> <password>'
+reg.success: '&2Successfully registered!'
+reg.noMatch: '&cYour passwords did not match!'
+reg.already: '&cYou are already registered!'
+reg.disabled: '&cRegistration is disabled.'
+reg.unsafePassword: '&cThe chosen password is unsafe; please choose another one.'
+reg.prompt: '&aYou are not registered yet. Use &c/register <password> <password>'
+reg.loginAfterRegister: '&aYou must log in next with &c/login <password>&a.'
+
+# --- changepassword ---
+changepassword.usage: '&cUsage: /changepassword <oldpassword> <newpassword>'
+changepassword.success: '&2Password changed successfully!'
+changepassword.wrong: '&cWrong old password!'
+
+# --- logout ---
+logout.success: '&2Successfully logged out.'
+logout.notlogged: '&cYou are not logged in.'
+
+# --- unregister ---
+unregister.usage: '&cUsage: /unregister <password>'
+unregister.success: '&2Your account has been removed.'
+unregister.wrong: '&cWrong password, account not removed.'
+
+# --- misc ---
+unknown_user: '&cThis username is not registered!'
+not_logged_in: '&cYou are not logged in!'
+already_logged_in: '&cYou are already logged in!'
+error: '&cAn error occurred. Please contact an administrator.'
+logged_in_as_other_location: '&cSomeone logged in from another location!'
+
+# --- captcha ---
+captcha.usage: '&cUsage: /captcha <code>'
+captcha.wrong: '&cWrong captcha code, type "/captcha <code>" with the new code.'
+captcha.required: '&cA captcha is required. Use &c/captcha <code>&c, code: &6{code}'
+captcha.success: '&2Captcha code accepted!'
+
+# --- 2FA ---
+totp.usage: '&cUsage: /2fa <code>'
+totp.success: '&2Two-factor authentication successful!'
+totp.wrong: '&cWrong two-factor code!'
+totp.required: '&cPlease confirm your identity with &c/2fa <code>&c.'
+totp.enabled: '&2Two-factor authentication is now enabled. Your key: &6{key}'
+totp.disabled: '&2Two-factor authentication has been disabled.'
+totp.already: '&cTwo-factor authentication is already enabled.'
+totp.notEnabled: '&cTwo-factor authentication is not enabled for your account.'
+
+# --- email ---
+email.usage: '&cUsage: /email add <email> <verifyEmail>'
+email.added: '&2Your email has been added successfully.'
+email.show: '&aYour current email address is: &c{email}'
+email.invalid: '&cInvalid email address!'
+email.noMatch: '&cYour emails did not match!'
+
+# --- admin (authme) ---
+admin.usage: '&cAuthMe admin commands: register, unregister, setpassword, reload, version, auth, unauth, accountdata, backup'
+admin.registered: '&2Player &a{player}&2 registered successfully.'
+admin.unregistered: '&2Player &a{player}&2 has been unregistered.'
+admin.setpassword: '&2Password changed for player &a{player}.'
+admin.playerNotFound: '&cPlayer &e{player}&c is not registered.'
+admin.reloaded: '&2Configuration reloaded.'
+admin.authed: '&2Player &a{player}&2 is now marked as authenticated.'
+admin.unauthed: '&2Player &a{player}&2 is now marked as unauthenticated.'
+admin.notAllowed: '&cYou do not have permission to use AuthMe admin commands.'
+admin.notPlayer: '&cThis command can only be run by a player.'
+admin.accountdata: '&aAccount for &e{player}&a: registered &e{date}&a from &e{ip}&a, last login &e{last}&a.'
+admin.backup: '&2A database backup has been created.'
+
+# --- premium bypass ---
+premium.set: '&2Your account is now premium; you will skip password login next time.'
+premium.removed: '&2Your account is no longer premium.'
+premium.usage: '&cUsage: /premium'
+
+# --- antibot / generic ---
+account_tempban: '&cToo many failed login attempts from your IP; you are temporarily banned.'
+web_session_login_success: ''

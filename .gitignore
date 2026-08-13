@@ -1,0 +1,29 @@
+# Gradle
+.gradle/
+build/
+out/
+*.class
+
+# IDE
+.idea/
+*.iml
+*.ipr
+*.iws
+.vscode/
+.settings/
+.project
+.classpath
+bin/
+
+# Fabric
+run/
+runs/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Authme runtime data (keep out of repo)
+authme.log
+authme.db
+*.db

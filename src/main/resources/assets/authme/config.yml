@@ -1,0 +1,151 @@
+# ===========================================================================
+# AuthMe Fabric configuration
+# ---------------------------------------------------------------------------
+# Keys are kept compatible with AuthMeReloaded's config.yml wherever possible,
+# so an existing AuthMe config can be dropped in with minimal changes.
+# This port reads only the keys documented below; unknown keys are ignored.
+# ===========================================================================
+
+DataSource:
+    # What type of database do you want to use?
+    # Valid values: SQLITE, MARIADB, MYSQL, POSTGRESQL
+    backend: SQLITE
+
+    # Enable the database caching system, should be disabled on bungeecord
+    # environments or when a website integration is being used.
+    caching: true
+
+    # Database host address
+    mySQLHost: '127.0.0.1'
+    # Database port
+    mySQLPort: '3306'
+    # Connect to MySQL database over SSL
+    mySQLUseSSL: true
+    # Verification of server's certificate.
+    mySQLCheckServerCertificate: true
+    # Authorize client to retrieve RSA server public key.
+    mySQLAllowPublicKeyRetrieval: true
+
+    # Username to connect to the MySQL database
+    mySQLUsername: 'authme'
+    # Password to connect to the MySQL database
+    mySQLPassword: '12345'
+    # Database Name, use with converters or as SQLITE database name
+    mySQLDatabase: 'authme'
+    # Table of the database
+    mySQLTablename: 'authme'
+
+    # Column names (keep identical to your AuthMe/Spigot table to share data)
+    mySQLColumnId: 'id'
+    mySQLColumnName: 'username'
+    mySQLRealName: 'realname'
+    mySQLColumnPassword: 'password'
+    # Leave empty for no separate salt column (SHA256 stores salt inside the hash)
+    mySQLColumnSalt: ''
+    mySQLColumnEmail: 'email'
+    mySQLColumnLogged: 'isLogged'
+    mySQLColumnHasSession: 'hasSession'
+    mySQLColumnIp: 'ip'
+    mySQLColumnLastLogin: 'lastlogin'
+    mySQLColumnRegisterDate: 'regdate'
+    mySQLColumnRegisterIp: 'regip'
+    mySQLlastlocX: 'x'
+    mySQLlastlocY: 'y'
+    mySQLlastlocZ: 'z'
+    mySQLlastlocWorld: 'world'
+    mySQLlastlocYaw: 'yaw'
+    mySQLlastlocPitch: 'pitch'
+    mySQLtotpKey: 'totp'
+    mySQLColumnPremiumUUID: 'premiumUUID'
+    mySQLPlayerUUID: ''
+
+    # Overrides the size of the DB Connection Pool, default = 10
+    poolSize: 10
+    # The maximum lifetime of a connection in the pool, default = 1800 seconds
+    maxLifetime: 1800
+
+settings:
+    security:
+        # Stop the server if we can't contact the sql database
+        SQLProblem:
+            stopServer: true
+        # Minimum length of password
+        minPasswordLength: 5
+        # Maximum length of password
+        passwordMaxLength: 30
+        # Possible values: SHA256, BCRYPT, BCRYPT2Y, PBKDF2, PBKDF2BASE64,
+        # ARGON2, ARGON2ID, SALTEDSHA512, SALTEDSHA256, SALTED2MD5, SHA512,
+        # SHA1, MD5, DOUBLESHA512, PLAINTEXT
+        passwordHash: SHA256
+        # Salt length for SALTED2MD5: MD5(MD5(password)+salt)
+        doubleMD5SaltLength: 8
+        # Number of rounds to use if passwordHash is set to PBKDF2
+        pbkdf2Rounds: 10000
+        # Prevent unsafe passwords from being used
+        unsafePasswords: ['123456', 'password', 'qwerty', '12345', '54321', '123456789', 'help']
+        captcha:
+            useCaptcha: false
+            maxLoginTry: 5
+            captchaLength: 5
+            captchaCountReset: 60
+            requireForRegistration: false
+        tempban:
+            enableTempban: false
+            maxLoginTries: 10
+            tempbanLength: 480
+            minutesBeforeCounterReset: 480
+
+    registration:
+        # Enable registration
+        enabled: true
+        # Send every player a message to register
+        force: true
+        # Take a player to the registration portal
+        forcePortalAfterRegister: false
+        # Timeout in seconds to register, 0 to disable
+        timeout: 120
+        # Whether to kick players if their password is unsafe
+        delayForKicking: 0
+        # Message threshold to register
+        messageThreshold: 0
+
+    session:
+        # Enable the session feature (login only once for a defined time)
+        enabled: false
+        # Session timeout in minutes
+        timeout: 60
+        # Only the player's IP can resume the session
+        sessionOnlyIp: false
+
+Hooks:
+    # BungeeCord/Velocity proxy forwarding verified premium UUIDs
+    bungeecord: false
+    # Displayname hook
+    displayname: false
+
+ExternalBoardOptions:
+    # BCrypt log2 round factor
+    bCryptLog2Round: 10
+
+# AntiBot system
+AntiBot:
+    enableAntiBot: false
+    antibotInterval: 5
+    antibotThreshold: 8
+    antibotCommands: []
+
+Settings:
+    # Restrict unauthenticated players
+    restrictUnauthenticated:
+        allowMovement: false
+        allowedMovementRadius: 0
+        # Commands usable before authentication
+        allowCommands: ['login', 'register', 'l', 'reg', 'authme', 'email', '2fa', 'totp', 'captcha']
+        # Hide tab-list until logged in
+        hideTablist: false
+    # Save quit location
+    saveQuitLocation: true
+    # Timeouts
+    timeouts:
+        loginTimeout: 120
+        registerTimeout: 120
