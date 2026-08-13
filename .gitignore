@@ -27,3 +27,33 @@ Thumbs.db
 authme.log
 authme.db
 *.db
+
+# Local dev-server runtime data (Fabric Loom `run` dir, in case anyone relocates them)
+server.properties
+ops.json
+usercache.json
+banned-*.json
+whitelist.json
+eula.txt
+world/
+logs/
+crash-reports/
+authme/                # runtime config / SQLite dir created under the run root
+*.log
+
+# Local developer overrides / secrets
+*.local
+local.properties
+.gradle.properties.local
+*.env
+.env
+.env.*
+
+# Signing keys / certificates (never commit)
+*.jks
+*.keystore
+*.p12
+*.pem
+*.key
+*.crt
+*.cer
