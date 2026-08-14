@@ -154,14 +154,14 @@
 ### 发布版本
 
 本项目使用“上游版本 + Fabric 移植发行线 + 本项目发布序号”的格式：
-`<上游版本>-fabric.<序号>`。当前正式版本为 `6.0.1-fabric.1`；后续继续基于上游
-AuthMeReloaded 6.0.1 修正时依次使用
+`<上游版本>-fabric.<序号>`。当前开发版本为 `6.0.1-fabric.2-SNAPSHOT`，最近的正式版本为
+`6.0.1-fabric.1`；后续继续基于上游 AuthMeReloaded 6.0.1 修正时依次使用
 `6.0.1-fabric.2`、`6.0.1-fabric.3` 等。完整规则见 [`RELEASE.md`](RELEASE.md)。
 
 会得到三个 jar：
-- `authme-fabric/build/libs/authme-fabric-6.0.1-fabric.1.jar`
-- `authme-fabric-mid/build/libs/authme-fabric-mid-6.0.1-fabric.1.jar`
-- `authme-fabric-legacy/build/libs/authme-fabric-legacy-6.0.1-fabric.1.jar`
+- `authme-fabric/build/libs/authme-fabric-6.0.1-fabric.2-SNAPSHOT.jar`
+- `authme-fabric-mid/build/libs/authme-fabric-mid-6.0.1-fabric.2-SNAPSHOT.jar`
+- `authme-fabric-legacy/build/libs/authme-fabric-legacy-6.0.1-fabric.2-SNAPSHOT.jar`
 
 （每个还有对应的 `-sources.jar`。）
 
