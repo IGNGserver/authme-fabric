@@ -62,8 +62,7 @@ public final class PlayerAuth {
     public int getGroupId() { return groupId; }
 
     public HashedPassword toHashedPassword() {
-        return new HashedPassword(salt != null && salt.isEmpty() ? null : hash,
-            salt != null && !salt.isEmpty() ? salt : null);
+        return new HashedPassword(hash, salt != null && !salt.isEmpty() ? salt : null);
     }
 
     public void setHash(String hash) { this.hash = hash; }

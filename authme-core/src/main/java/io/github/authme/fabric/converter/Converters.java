@@ -18,15 +18,30 @@ public final class Converters {
 
     static {
         register("sqlitetosql", SQLiteToSqlConverter::new);
-        // Stub converters — listed for awareness, will report "not implemented" when run.
-        register("authplus",       args -> stub("authplus", args));
-        register("librelogin",     args -> stub("librelogin", args));
-        register("limboauth",      args -> stub("limboauth", args));
-        register("nlogin",         args -> stub("nlogin", args));
-        register("openlogin",      args -> stub("openlogin", args));
-        register("tiauth",         args -> stub("tiauth", args));
-        register("nexauth",        args -> stub("nexauth", args));
-        register("mysqltosqlite",  args -> stub("mysqltosqlite", args));
+        register("authplus", args -> new PluginImportConverter("authplus",
+            "Import Auth+ players.yml (entries must contain a player name and password hash).",
+            "plugins/Auth/players.yml", "", true).withArgument(args));
+        register("librelogin", args -> new PluginImportConverter("librelogin",
+            "Import LibreLogin SQLite account rows; use path or path|table.",
+            "plugins/LibreLogin/user-data.db", "librepremium_data").withArgument(args));
+        register("limboauth", args -> new PluginImportConverter("limboauth",
+            "Import LimboAuth SQLite account rows; use path or path|table.",
+            "plugins/LimboAuth/database.db", "users").withArgument(args));
+        register("nlogin", args -> new PluginImportConverter("nlogin",
+            "Import nLogin SQLite account rows; use path or path|table.",
+            "plugins/nLogin/nlogin.db", "nlogin").withArgument(args));
+        register("openlogin", args -> new PluginImportConverter("openlogin",
+            "Import OpeNLogin SQLite account rows; use path or path|table.",
+            "plugins/OpeNLogin/accounts.db", "openlogin").withArgument(args));
+        register("tiauth", args -> new PluginImportConverter("tiauth",
+            "Import tiAuth SQLite account rows; use path or path|table.",
+            "plugins/tiAuth/auth.db", "auth_users").withArgument(args));
+        register("nexauth", args -> new PluginImportConverter("nexauth",
+            "Import NexAuth SQLite account rows; use path or path|table.",
+            "plugins/NexAuth/user-data.db", "librepremium_data").withArgument(args));
+        register("mysqltosqlite", args -> new PluginImportConverter("mysqltosqlite",
+            "Import an AuthMe-shaped SQLite snapshot into the active SQLite target; use path or path|table.",
+            "authme.db", "authme").withArgument(args));
     }
 
     /** A factory that builds a converter from a free-form string argument (path / connection / ...). */
@@ -72,7 +87,4 @@ public final class Converters {
         return REGISTRY.containsKey(id.toLowerCase(java.util.Locale.ROOT));
     }
 
-    private static Converter stub(String id, String arg) {
-        return new StubConverter(id, "Not implemented in this Fabric port yet. Tracked as a known limitation.");
-    }
 }

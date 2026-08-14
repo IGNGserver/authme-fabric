@@ -33,13 +33,14 @@ public final class HashUtils {
     }
 
     public static boolean isEqual(String string1, String string2) {
+        if (string1 == null || string2 == null) return false;
         return MessageDigest.isEqual(
             string1.getBytes(StandardCharsets.UTF_8),
             string2.getBytes(StandardCharsets.UTF_8));
     }
 
     public static boolean isValidBcryptHash(String hash) {
-        return hash.length() == 60 && hash.substring(0, 2).equals("$2");
+        return hash != null && hash.length() == 60 && hash.startsWith("$2");
     }
 
     public static String hmacSha256(String secret, String message) {
@@ -55,7 +56,7 @@ public final class HashUtils {
 
     public static String hash(String message, MessageDigest algorithm) {
         algorithm.reset();
-        algorithm.update(message.getBytes());
+        algorithm.update(message.getBytes(StandardCharsets.UTF_8));
         byte[] digest = algorithm.digest();
         return String.format("%0" + (digest.length << 1) + "x", new BigInteger(1, digest));
     }

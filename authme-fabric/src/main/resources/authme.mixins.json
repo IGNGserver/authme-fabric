@@ -5,7 +5,10 @@
   "compatibilityLevel": "JAVA_21",
   "mixins": [
     "CommandDispatcherMixin",
-    "ContainerClickMixin"
+    "ContainerClickMixin",
+    "CommandSuggestionMixin",
+    "JoinMessageMixin",
+    "LeaveMessageMixin"
   ],
   "injectors": {
     "defaultRequire": 1

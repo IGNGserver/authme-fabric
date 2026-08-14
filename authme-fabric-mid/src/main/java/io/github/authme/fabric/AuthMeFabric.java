@@ -2,12 +2,14 @@ package io.github.authme.fabric;
 
 import io.github.authme.fabric.command.AuthMeCommands;
 import io.github.authme.fabric.events.AuthMeEvents;
+import io.github.authme.fabric.network.ProxyBridge;
 import io.github.authme.fabric.util.Log;
 import io.github.authme.fabric.util.Log4jLogSink;
 
 import net.fabricmc.api.ModInitializer;
 import net.fabricmc.fabric.api.command.v2.CommandRegistrationCallback;
 import net.fabricmc.fabric.api.event.lifecycle.v1.ServerLifecycleEvents;
+import net.fabricmc.loader.api.FabricLoader;
 
 /**
  * AuthMe Reloaded → Fabric port. Entry point: registers commands and events during mod load, and
@@ -16,21 +18,32 @@ import net.fabricmc.fabric.api.event.lifecycle.v1.ServerLifecycleEvents;
  */
 public final class AuthMeFabric implements ModInitializer {
 
+    /** Returns the version declared by this build's fabric.mod.json. */
+    public static String version() {
+        return FabricLoader.getInstance()
+            .getModContainer("authme")
+            .map(mod -> mod.getMetadata().getVersion().getFriendlyString())
+            .orElse("unknown");
+    }
+
     @Override
     public void onInitialize() {
         Log.setSink(new Log4jLogSink());
         AuthMe.require(); // create the singleton holder early
 
         CommandRegistrationCallback.EVENT.register(AuthMeCommands::register);
+        ProxyBridge.register();
         AuthMeEvents.register();
 
         ServerLifecycleEvents.SERVER_STARTED.register(server -> {
             AuthMe am = AuthMe.require();
             boolean ok = am.init(server);
             if (!ok) {
-                Log.error("AuthMe failed to initialise — the server will continue but players are NOT protected.");
+                Log.error("AuthMe failed to initialise; stopping the server to keep authentication fail-closed.");
+                server.halt(false);
                 return;
             }
+            ProxyBridge.bind(am, server);
             Log.info("AuthMe Fabric is now protecting this server.");
         });
 
@@ -39,6 +52,6 @@ public final class AuthMeFabric implements ModInitializer {
             if (am != null) am.shutdown();
         });
 
-        Log.info("AuthMe Fabric v6.0.1 (mid) loaded — MC 1.20.5–1.21.10 (GPL-3.0).");
+        Log.info("AuthMe Fabric v" + version() + " (mid) loaded — MC 1.20.5–1.21.10 (GPL-3.0).");
     }
 }

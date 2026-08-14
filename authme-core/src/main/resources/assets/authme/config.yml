@@ -14,6 +14,9 @@ DataSource:
     # Enable the database caching system, should be disabled on bungeecord
     # environments or when a website integration is being used.
     caching: true
+    # Cache refresh/expiry bounds in seconds/minutes. Cache failures are never stored.
+    cacheRefreshSeconds: 300
+    cacheExpireMinutes: 15
 
     # Database host address
     mySQLHost: '127.0.0.1'
@@ -94,20 +97,77 @@ settings:
             maxLoginTries: 10
             tempbanLength: 480
             minutesBeforeCounterReset: 480
+            customCommand: ''
 
     registration:
         # Enable registration
         enabled: true
-        # Send every player a message to register
+        # Send every X seconds a message to register/login
         force: true
+        messageInterval: 5
+        # Maximum number of new accounts from one IP address (0 disables the limit).
+        maxRegPerIp: 1
+        # PASSWORD asks the player for a password; EMAIL generates a password and mails it.
+        type: PASSWORD
+        # NONE, CONFIRMATION, EMAIL_OPTIONAL, or EMAIL_MANDATORY
+        secondArg: CONFIRMATION
         # Take a player to the registration portal
         forcePortalAfterRegister: false
+        forceKickAfterRegister: false
+        forceLoginAfterRegister: false
         # Timeout in seconds to register, 0 to disable
-        timeout: 120
+        timeout: 30
         # Whether to kick players if their password is unsafe
         delayForKicking: 0
         # Message threshold to register
         messageThreshold: 0
+        # Native Minecraft dialog UI on 1.21.11. Older supported modules safely use chat.
+        dialog:
+            postJoin:
+                enable: true
+            showForgotPasswordButton: true
+            showBody: true
+    useWelcomeMessage: true
+    broadcastWelcomeMessage: false
+    delayJoinMessage: false
+    customJoinMessage: ''
+    removeUnloggedLeaveMessage: false
+    removeJoinMessage: false
+    removeLeaveMessage: false
+    applyBlindEffect: false
+    serverName: 'Minecraft Server'
+
+    # Server-wide message language. Optional messages_<locale>.yml overrides are supported.
+    messagesLanguage: en
+
+    restrictions:
+        # Restricted usernames and permitted IPs, one entry per line: player;127.0.0.* or player;regex:...
+        AllowRestrictedUser: false
+        AllowedRestrictedUser: []
+        banUnsafedIP: false
+        noTeleport: false
+        kickOnWrongPassword: true
+        ForceSingleSession: true
+        removeSpeed: false
+        displayOtherAccounts: true
+        otherAccountsThreshold: 0
+        otherAccountsCmd: ''
+        otherAccountsCmdThreshold: 5
+        # Maximum simultaneous logged-in players from one IP (0 disables the limit).
+        maxLoginPerIp: 0
+        # Maximum simultaneous joined players from one IP (0 disables the limit).
+        maxJoinPerIp: 0
+        enablePasswordVerifier: true
+        allowedPasswordCharacters: '[!-~]*'
+        registerTimeout: 30
+        loginTimeout: 30
+        ForceSpawnLocOnJoin:
+            enabled: false
+            worlds: ['world', 'world_nether', 'world_the_end']
+
+    unrestrictions:
+        # Names listed here bypass AuthMe authentication (use only for trusted NPC/mod accounts).
+        UnrestrictedName: []
 
     session:
         # Enable the session feature (login only once for a defined time)
@@ -116,12 +176,57 @@ settings:
         timeout: 60
         # Only the player's IP can resume the session
         sessionOnlyIp: false
+        # Expire a session when the player's IP changes
+        sessionExpireOnIpChange: false
 
 Hooks:
     # BungeeCord/Velocity proxy forwarding verified premium UUIDs
     bungeecord: false
+    sendPlayerTo: ''
+    # Must match the AuthMe proxy plugin. Empty rejects perform.login messages.
+    proxySharedSecret: ''
     # Displayname hook
     displayname: false
+
+# Automatic logical database backup. Manual /authme backup remains available regardless of this switch.
+BackupSystem:
+    ActivateBackup: false
+    OnServerStart: false
+    OnServerStop: false
+    intervalHours: 0
+
+# Automatic removal of old AuthMe account records.
+Purge:
+    useAutoPurge: false
+    daysBeforeRemovePlayer: 60
+    purgeBannedPlayers: false
+    removePlayerDat: false
+    removeEssentialsFile: false
+    defaultWorld: 'world'
+    removeLimitedCreativesInventories: false
+    removeAntiXRayFile: false
+    removePermissions: false
+
+# E-mail recovery and optional e-mail verification. Disabled by default; configure a real SMTP
+# relay before enabling it. Credentials are read from this file and are never written to logs.
+Email:
+    enabled: false
+    host: '127.0.0.1'
+    port: 25
+    username: ''
+    password: ''
+    from: ''
+    senderName: 'AuthMe'
+    subject: 'AuthMe'
+    ssl: false
+    startTls: true
+    timeoutMillis: 10000
+    recoveryTimeoutSeconds: 600
+    # Maximum number of accounts which may use the same address (0 disables the limit).
+    maxRegPerEmail: 1
+    # Length of generated passwords in EMAIL registration mode.
+    RecoveryPasswordLength: 8
+    requireVerification: false
 
 ExternalBoardOptions:
     # BCrypt log2 round factor
@@ -132,20 +237,41 @@ AntiBot:
     enableAntiBot: false
     antibotInterval: 5
     antibotThreshold: 8
+    antibotDuration: 10
+    antibotDelay: 60
     antibotCommands: []
 
+# Country protection. Put a GeoLite2-Country/GeoIP2-Country .mmdb file in this
+# directory to use MaxMind data, or keep the small operator-managed CIDR CSV.
+Protection:
+    enableProtection: false
+    enableProtectionRegistered: true
+    geoIpDatabase:
+        enabled: true
+        failClosed: false
+        file: 'geoip-countries.csv'
+    countries: ['US', 'GB', 'LOCALHOST']
+    countriesBlacklist: ['A1']
+
 Settings:
+    permission:
+        EnablePermissionCheck: true
+    GameMode:
+        ForceSurvivalMode: false
+        ForceOnlyAfterLogin: false
+        ResetInventoryIfCreative: false
     # Restrict unauthenticated players
     restrictUnauthenticated:
         allowMovement: false
-        allowedMovementRadius: 0
+        allowedMovementRadius: 100
         # Commands usable before authentication
         allowCommands: ['login', 'register', 'l', 'reg', 'authme', 'email', '2fa', 'totp', 'captcha']
         # Hide tab-list until logged in
         hideTablist: false
+        DenyTabCompleteBeforeLogin: false
     # Save quit location
-    saveQuitLocation: true
+    saveQuitLocation: false
     # Timeouts
     timeouts:
-        loginTimeout: 120
-        registerTimeout: 120
+        loginTimeout: 30
+        registerTimeout: 30

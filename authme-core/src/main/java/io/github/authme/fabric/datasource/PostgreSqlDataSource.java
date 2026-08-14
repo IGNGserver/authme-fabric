@@ -44,14 +44,7 @@ public class PostgreSqlDataSource extends AbstractSqlDataSource {
     protected String buildJdbcUrl() {
         StringBuilder u = new StringBuilder("jdbc:postgresql://")
             .append(settings.host).append(':').append(settings.port).append('/').append(settings.database);
-        boolean first = true;
-        if (settings.user != null && !settings.user.isEmpty()) {
-            u.append(first ? '?' : '&').append("user=").append(settings.user); first = false;
-        }
-        if (settings.password != null && !settings.password.isEmpty()) {
-            u.append(first ? '?' : '&').append("password=").append(settings.password); first = false;
-        }
-        u.append(first ? '?' : '&').append("binaryTransfer=true");
+        u.append("?binaryTransfer=true");
         return u.toString();
     }
 
@@ -74,7 +67,10 @@ public class PostgreSqlDataSource extends AbstractSqlDataSource {
 
     @Override
     protected void createSchemaAndColumns() throws SQLException {
-        try (Connection con = borrowConnection(); Statement st = con.createStatement()) {
+        Connection con = null;
+        try {
+            con = borrowConnection();
+            try (Statement st = con.createStatement()) {
             String t = quote(settings.table);
             // Ensure a sequence-backed id exists; CREATE TABLE IF NOT EXISTS won't duplicate.
             st.executeUpdate("CREATE TABLE IF NOT EXISTS " + t + " ("
@@ -148,6 +144,9 @@ public class PostgreSqlDataSource extends AbstractSqlDataSource {
             if (col.hasPremiumUuidColumn() && isColumnMissing(md, col.PREMIUM_UUID)) {
                 st.executeUpdate("ALTER TABLE " + t + " ADD COLUMN " + quote(col.PREMIUM_UUID) + " VARCHAR(36);");
             }
+            }
+        } finally {
+            releaseConnection(con);
         }
         Log.info("PostgreSQL setup finished (table=" + settings.table + ")");
     }

@@ -10,6 +10,7 @@ public enum HashAlgorithm {
     ARGON2ID,
     BCRYPT,
     BCRYPT2Y,
+    CUSTOM,
     CMW,
     CRAZYCRYPT1,
     DOUBLE_SHA512,

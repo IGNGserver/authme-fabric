@@ -31,7 +31,7 @@ public abstract class ContainerClickMixin {
         if (am == null || am.authManager() == null) return;
         ServerPlayer player = getPlayer();
         if (player == null) return;
-        if (am.authManager().isUnauthenticated(player)) {
+        if (am.config().protectInventoryBeforeLogin() && am.authManager().isUnauthenticated(player)) {
             ci.cancel();
         }
     }

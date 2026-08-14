@@ -44,6 +44,9 @@ public final class PasswordSecurity {
     }
 
     public HashedPassword computeHash(String password, String name) {
+        if (primaryMethod == null) {
+            throw new IllegalStateException("The CUSTOM password algorithm requires an external implementation");
+        }
         return primaryMethod.computeHash(password, name);
     }
 
@@ -52,7 +55,7 @@ public final class PasswordSecurity {
     }
 
     public boolean hasSeparateSalt() {
-        return primaryMethod.hasSeparateSalt();
+        return primaryMethod != null && primaryMethod.hasSeparateSalt();
     }
 
     /**
@@ -63,19 +66,29 @@ public final class PasswordSecurity {
      *         if none matched.
      */
     public VerificationResult verify(String password, HashedPassword hashedPassword, String name) {
-        if (hashedPassword == null || hashedPassword.getHash() == null) {
+        if (password == null || hashedPassword == null || hashedPassword.getHash() == null) {
             return null;
         }
-        if (primaryMethod.comparePassword(password, hashedPassword, name)) {
+        if (safeCompare(primaryMethod, password, hashedPassword, name)) {
             return new VerificationResult(primaryAlgorithm, false);
         }
         for (int i = 0; i < legacyMethods.size(); i++) {
             EncryptionMethod m = legacyMethods.get(i);
-            if (m.comparePassword(password, hashedPassword, name)) {
+            if (safeCompare(m, password, hashedPassword, name)) {
                 return new VerificationResult(null, true);
             }
         }
         return null;
+    }
+
+    private static boolean safeCompare(EncryptionMethod method, String password,
+                                       HashedPassword hashedPassword, String name) {
+        if (method == null || (method.hasSeparateSalt() && hashedPassword.getSalt() == null)) return false;
+        try {
+            return method.comparePassword(password, hashedPassword, name);
+        } catch (RuntimeException malformedHash) {
+            return false;
+        }
     }
 
     public boolean matches(String password, HashedPassword hashedPassword, String name) {
@@ -100,11 +113,28 @@ public final class PasswordSecurity {
             case PBKDF2BASE64: return new Pbkdf2Base64(Math.max(1, pbkdf2Rounds));
             case ARGON2: return new Argon2();
             case ARGON2ID: return new Argon2Id();
+            case CMW: return LegacyHashMethods.cmw();
+            case CRAZYCRYPT1: return LegacyHashMethods.crazyCrypt1();
+            case DOUBLEMD5: return LegacyHashMethods.doubleMd5();
+            case IPB3: return LegacyHashMethods.ipb3();
+            case IPB4: return LegacyHashMethods.ipb4();
+            case JOOMLA: return LegacyHashMethods.joomla();
+            case MD5VB: return LegacyHashMethods.md5vb();
+            case MYBB: return LegacyHashMethods.mybb();
+            case PBKDF2DJANGO: return LegacyHashMethods.pbkdf2Django();
+            case PHPBB: return LegacyHashMethods.phpbb();
+            case PHPFUSION: return LegacyHashMethods.phpFusion();
+            case ROYALAUTH: return LegacyHashMethods.royalAuth();
+            case SMF: return LegacyHashMethods.smf();
+            case TWO_FACTOR: return LegacyHashMethods.twoFactor();
+            case WBB3: return LegacyHashMethods.wbb3();
+            case WBB4: return LegacyHashMethods.wbb4();
+            case WORDPRESS: return LegacyHashMethods.wordpress();
+            case XFBCRYPT: return LegacyHashMethods.xfBcrypt();
+            case CUSTOM: return null;
             default:
                 throw new IllegalArgumentException("Hash algorithm '" + algorithm
-                    + "' is recognized but not implemented by this Fabric port. "
-                    + "Please use one of: SHA256, BCRYPT, BCRYPT2Y, PBKDF2, PBKDF2BASE64, "
-                    + "ARGON2, ARGON2ID, SALTEDSHA512, SALTEDSHA256, SALTED2MD5, SHA512, SHA1, MD5, DOUBLE_SHA512, PLAINTEXT.");
+                    + "' is not supported by this build.");
         }
     }
 

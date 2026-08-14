@@ -16,7 +16,7 @@
   "license": "GPL-3.0",
   "environment": "server",
   "entrypoints": {
-    "server": [
+    "main": [
       "io.github.authme.fabric.AuthMeFabric"
     ]
   },
