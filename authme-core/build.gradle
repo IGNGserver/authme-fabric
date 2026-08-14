@@ -21,6 +21,50 @@ dependencies {
     api "org.yaml:snakeyaml:${rootProject.snakeyaml_version}"
     // BouncyCastle: used by Argon2/BCrypt/PBKDF2 hash implementations.
     api "org.bouncycastle:bcprov-jdk18on:${rootProject.bouncycastle_version}"
+    testImplementation "org.xerial:sqlite-jdbc:${rootProject.sqlite_version}"
+}
+
+tasks.register('coreSelfTest', JavaExec) {
+    dependsOn testClasses
+    classpath = sourceSets.test.runtimeClasspath
+    mainClass = 'io.github.authme.fabric.CoreSelfTest'
+}
+
+tasks.register('dataSourceSelfTest', JavaExec) {
+    dependsOn testClasses
+    classpath = sourceSets.test.runtimeClasspath
+    mainClass = 'io.github.authme.fabric.DataSourceSelfTest'
+}
+
+tasks.register('mailSelfTest', JavaExec) {
+    dependsOn testClasses
+    classpath = sourceSets.test.runtimeClasspath
+    mainClass = 'io.github.authme.fabric.MailSelfTest'
+}
+
+tasks.register('configSelfTest', JavaExec) {
+    dependsOn testClasses
+    classpath = sourceSets.test.runtimeClasspath
+    mainClass = 'io.github.authme.fabric.ConfigSelfTest'
+}
+
+tasks.register('externalDbSelfTest', JavaExec) {
+    dependsOn testClasses
+    classpath = sourceSets.test.runtimeClasspath
+    mainClass = 'io.github.authme.fabric.ExternalDbSelfTest'
+}
+
+tasks.named('check') {
+    dependsOn tasks.named('coreSelfTest')
+    dependsOn tasks.named('dataSourceSelfTest')
+    dependsOn tasks.named('mailSelfTest')
+    dependsOn tasks.named('configSelfTest')
+}
+
+tasks.withType(Test).configureEach {
+    // The core regression suite is intentionally dependency-light JavaExec code; keep the
+    // standard lifecycle task from failing merely because no JUnit engine is present.
+    failOnNoDiscoveredTests = false
 }
 
 jar {

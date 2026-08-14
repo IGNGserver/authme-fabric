@@ -73,7 +73,10 @@ public class SQLiteDataSource extends AbstractSqlDataSource {
         // strip trailing ", "
         String sql = sb.substring(0, sb.length() - 2) + ");";
 
-        try (Connection con = borrowConnection(); Statement st = con.createStatement()) {
+        Connection con = null;
+        try {
+            con = borrowConnection();
+            try (Statement st = con.createStatement()) {
             st.executeUpdate(sql);
             DatabaseMetaData md = con.getMetaData();
             if (col.hasSaltColumn() && isColumnMissing(md, col.SALT)) {
@@ -88,6 +91,9 @@ public class SQLiteDataSource extends AbstractSqlDataSource {
             if (col.hasPlayerUuidColumn() && isColumnMissing(md, col.PLAYER_UUID)) {
                 st.executeUpdate("ALTER TABLE " + t + " ADD COLUMN " + col.PLAYER_UUID + " VARCHAR(36);");
             }
+            }
+        } finally {
+            releaseConnection(con);
         }
         Log.info("SQLite setup finished (file=" + settings.database + ")");
     }

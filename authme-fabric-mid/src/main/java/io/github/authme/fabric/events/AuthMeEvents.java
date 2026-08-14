@@ -55,7 +55,8 @@ public final class AuthMeEvents {
 
         ServerMessageEvents.ALLOW_CHAT_MESSAGE.register((message, sender, boundChatType) -> {
             AuthMe am = AuthMe.get();
-            if (am != null && am.authManager() != null && sender != null && am.authManager().isUnauthenticated(sender)) {
+            if (am != null && am.authManager() != null && sender != null && am.authManager().isUnauthenticated(sender)
+                && (!am.config().allowChat() || am.config().hideChat())) {
                 return false;
             }
             return true;

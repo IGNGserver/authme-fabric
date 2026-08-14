@@ -48,7 +48,10 @@ public class MySQLDataSource extends AbstractSqlDataSource {
     @Override
     protected void createSchemaAndColumns() throws SQLException {
         String t = settings.table;
-        try (Connection con = borrowConnection(); Statement st = con.createStatement()) {
+        Connection con = null;
+        try {
+            con = borrowConnection();
+            try (Statement st = con.createStatement()) {
             st.executeUpdate("CREATE TABLE IF NOT EXISTS " + t + " ("
                 + col.ID + " MEDIUMINT(8) UNSIGNED AUTO_INCREMENT, PRIMARY KEY (" + col.ID + ")"
                 + ") CHARACTER SET = utf8;");
@@ -120,6 +123,9 @@ public class MySQLDataSource extends AbstractSqlDataSource {
             if (col.hasPremiumUuidColumn() && isColumnMissing(md, col.PREMIUM_UUID)) {
                 st.executeUpdate("ALTER TABLE " + t + " ADD COLUMN " + col.PREMIUM_UUID + " VARCHAR(36);");
             }
+            }
+        } finally {
+            releaseConnection(con);
         }
         Log.info("MySQL setup finished (table=" + t + ")");
     }

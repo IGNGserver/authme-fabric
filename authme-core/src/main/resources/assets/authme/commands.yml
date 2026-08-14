@@ -1,0 +1,11 @@
+# AuthMe-compatible event command hooks.
+# Supported events: onJoin, onLogin, onSessionLogin, onFirstLogin, onRegister, onUnregister, onLogout
+# Placeholders: %p (lower-case account), %nick, %ip, %country.
+# executor is CONSOLE or PLAYER; delay is measured in ticks.
+onJoin: {}
+onLogin: {}
+onSessionLogin: {}
+onFirstLogin: {}
+onRegister: {}
+onUnregister: {}
+onLogout: {}

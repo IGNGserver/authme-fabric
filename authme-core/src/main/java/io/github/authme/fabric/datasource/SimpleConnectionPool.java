@@ -15,22 +15,33 @@ public final class SimpleConnectionPool {
     private final String jdbcUrl;
     private final Properties props;
     private final int maxSize;
-    private final ArrayDeque<Connection> idle = new ArrayDeque<>();
+    private final long maxLifetimeMillis;
+    private final ArrayDeque<IdleConnection> idle = new ArrayDeque<>();
     private int inUse = 0;
     private boolean closed = false;
 
     public SimpleConnectionPool(String jdbcUrl, String user, String password, int maxSize) {
+        this(jdbcUrl, user, password, maxSize, 0);
+    }
+
+    public SimpleConnectionPool(String jdbcUrl, String user, String password, int maxSize, int maxLifetimeSeconds) {
         this.jdbcUrl = jdbcUrl;
         this.maxSize = Math.max(2, maxSize);
+        this.maxLifetimeMillis = lifetimeMillis(maxLifetimeSeconds);
         this.props = new Properties();
         if (user != null) this.props.setProperty("user", user);
         if (password != null) this.props.setProperty("password", password);
     }
 
     public SimpleConnectionPool(String jdbcUrl, Properties props, int maxSize) {
+        this(jdbcUrl, props, maxSize, 0);
+    }
+
+    public SimpleConnectionPool(String jdbcUrl, Properties props, int maxSize, int maxLifetimeSeconds) {
         this.jdbcUrl = jdbcUrl;
         this.props = props;
         this.maxSize = Math.max(2, maxSize);
+        this.maxLifetimeMillis = lifetimeMillis(maxLifetimeSeconds);
     }
 
     /**
@@ -42,10 +53,13 @@ public final class SimpleConnectionPool {
         long deadline = System.currentTimeMillis() + Math.max(0, timeoutMillis);
         while (!closed) {
             while (!idle.isEmpty()) {
-                Connection c = idle.poll();
-                if (c == null) break;
+                IdleConnection entry = idle.poll();
+                if (entry == null) break;
+                Connection c = entry.connection;
                 try {
-                    if (!c.isClosed() && c.isValid(2)) {
+                    boolean youngEnough = maxLifetimeMillis <= 0
+                        || System.currentTimeMillis() - entry.createdAt < maxLifetimeMillis;
+                    if (youngEnough && !c.isClosed() && c.isValid(2)) {
                         inUse++;
                         return c;
                     }
@@ -103,7 +117,7 @@ public final class SimpleConnectionPool {
             } else if (!c.isValid(1)) {
                 closeQuietly(c);
             } else {
-                idle.offer(c);
+                idle.offer(new IdleConnection(c, System.currentTimeMillis()));
             }
         } catch (SQLException e) {
             closeQuietly(c);
@@ -113,7 +127,7 @@ public final class SimpleConnectionPool {
 
     public synchronized void close() {
         closed = true;
-        for (Connection c : idle) closeQuietly(c);
+        for (IdleConnection entry : idle) closeQuietly(entry.connection);
         idle.clear();
         notifyAll();
     }
@@ -121,5 +135,19 @@ public final class SimpleConnectionPool {
     private static void closeQuietly(Connection c) {
         if (c == null) return;
         try { c.close(); } catch (SQLException ignored) { }
+    }
+
+    private static long lifetimeMillis(int seconds) {
+        return seconds <= 0 ? 0L : Math.max(1L, seconds) * 1000L;
+    }
+
+    private static final class IdleConnection {
+        final Connection connection;
+        final long createdAt;
+
+        IdleConnection(Connection connection, long createdAt) {
+            this.connection = connection;
+            this.createdAt = createdAt;
+        }
     }
 }
