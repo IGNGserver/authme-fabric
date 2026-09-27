@@ -3,6 +3,7 @@ package io.github.authme.fabric.converter;
 import io.github.authme.fabric.util.Log;
 
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 
 /**
@@ -67,6 +68,11 @@ public final class Converters {
             }
         }
         return sb.toString();
+    }
+
+    /** Stable converter IDs for native command completion. */
+    public static List<String> ids() {
+        return List.copyOf(REGISTRY.keySet());
     }
 
     /**

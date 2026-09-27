@@ -1,13 +1,24 @@
 package io.github.authme.fabric;
 
+import io.github.authme.fabric.antibot.AntiBotManager;
+import io.github.authme.fabric.config.AuthMeConfig;
 import io.github.authme.fabric.security.HashAlgorithm;
 import io.github.authme.fabric.security.HashedPassword;
 import io.github.authme.fabric.security.PasswordSecurity;
 import io.github.authme.fabric.totp.TotpProvider;
 import io.github.authme.fabric.util.ProxyProtocol;
+import io.github.authme.fabric.util.PurgeFileCleaner;
+import io.github.authme.fabric.auth.SessionSecurityPolicy;
+import io.github.authme.fabric.auth.CommandTokenPolicy;
+import io.github.authme.fabric.auth.LoginFailurePolicy;
+import io.github.authme.fabric.auth.EmailAddressPolicy;
+import io.github.authme.fabric.auth.QuickCommandPolicy;
+import io.github.authme.fabric.datasource.PlayerAuth;
 
 import java.util.List;
 import java.util.UUID;
+import java.nio.file.Files;
+import java.nio.file.Path;
 
 /** Lightweight dependency-free regression test executed by the Gradle check task. */
 public final class CoreSelfTest {
@@ -32,10 +43,46 @@ public final class CoreSelfTest {
         PasswordSecurity sha = new PasswordSecurity(HashAlgorithm.SHA256, 20, 4, 8, List.of());
         require(sha.verify("x", new HashedPassword("$SHA$not-a-valid-hash"), "PlayerOne") == null,
             "malformed SHA256 hash was not rejected");
+        require(sha.verify("x", new HashedPassword("x".repeat(4097)), "PlayerOne") == null,
+            "oversized stored password hash was accepted");
         require(sha.verify("x", new HashedPassword("$argon2id$broken"), "PlayerOne") == null,
             "malformed Argon2 hash was not rejected");
+        PasswordSecurity argon = new PasswordSecurity(HashAlgorithm.ARGON2ID, 20, 4, 8, List.of());
+        String validArgon = argon.computeHash("CorrectHorse9", "PlayerOne").getHash();
+        require(argon.matches("CorrectHorse9", new HashedPassword(validArgon), "PlayerOne"),
+            "valid Argon2id hash did not round-trip");
+        require(argon.verify("x", new HashedPassword(validArgon.replace("m=65536", "m=999999999")),
+            "PlayerOne") == null, "unsafe Argon2 memory parameter was not rejected");
+        require(!TotpProvider.isPlausibleSecret("A".repeat(257)), "oversized TOTP secret was accepted");
+        try {
+            TotpProvider.base32Decode("A".repeat(257));
+            throw new AssertionError("oversized TOTP secret was decoded");
+        } catch (IllegalArgumentException expected) {
+            // Corrupt database data must not cause an unbounded allocation.
+        }
+        sessionSecurityPolicy();
+        loginFailurePolicy();
+        commandTokenPolicy();
+        quickCommandPolicy();
+        emailAddressPolicy();
+        purgePathSafety();
         proxyProtocolRoundTrip();
+        antiBotState();
         System.out.println("AuthMe core self-test passed for all implemented hash algorithms.");
+    }
+
+    private static void sessionSecurityPolicy() {
+        long login = 1_000_000L;
+        require(SessionSecurityPolicy.canResume("192.0.2.10", "192.0.2.10", login,
+                login + 59_000L, 60_000L), "same-IP session was rejected");
+        require(!SessionSecurityPolicy.canResume("192.0.2.10", "192.0.2.11", login,
+                login + 1_000L, 60_000L), "different-IP session was accepted");
+        require(!SessionSecurityPolicy.canResume("192.0.2.10", "192.0.2.10", login,
+                login + 60_001L, 60_000L), "expired session was accepted");
+        require(!SessionSecurityPolicy.canResume(null, "192.0.2.10", login,
+                login + 1_000L, 60_000L), "session with missing stored IP was accepted");
+        require(SessionSecurityPolicy.canResume("[2001:db8::1]", "2001:DB8::1", login,
+                login + 1_000L, 60_000L), "equivalent IPv6 addresses were rejected");
     }
 
     private static void proxyProtocolRoundTrip() {
@@ -48,10 +95,16 @@ public final class CoreSelfTest {
                 && accepted.playerName().equals("proxytest") && premium.equals(accepted.premiumUuid()),
             "signed proxy login was not accepted");
         require(ProxyProtocol.parse(signed, secret) == null, "proxy replay was not rejected");
-        require(ProxyProtocol.parse(ProxyProtocol.encode(ProxyProtocol.LOGOUT, "ProxyTest"), secret)
-                .premiumUuid() == null, "ordinary proxy message was not parsed");
+        byte[] ordinary = ProxyProtocol.encode(ProxyProtocol.LOGOUT, "ProxyTest");
+        require(ProxyProtocol.parse(ordinary, secret).premiumUuid() == null,
+            "ordinary proxy message was not parsed");
+        byte[] trailing = java.util.Arrays.copyOf(ordinary, ordinary.length + 1);
+        require(ProxyProtocol.parse(trailing, secret) == null,
+            "proxy message with trailing bytes was accepted");
         require(ProxyProtocol.parse(ProxyProtocol.encodePerformLogin("wrong", "ProxyTest", now, null), secret) == null,
             "proxy message with a wrong secret was accepted");
+        require(ProxyProtocol.parse(ProxyProtocol.encodePerformLogin(secret, "ProxyTest",
+            Long.MIN_VALUE, null), secret) == null, "overflowing proxy timestamp was accepted");
         ProxyProtocol.Incoming chunk = ProxyProtocol.parse(
             ProxyProtocol.encode(ProxyProtocol.PREMIUM_LIST_CHUNK, "0:1:playerone,playertwo"), secret);
         require(chunk != null && chunk.playerName().equals("0:1:playerone,playertwo"),
@@ -61,6 +114,125 @@ public final class CoreSelfTest {
             throw new AssertionError("unsafe premium list name was accepted");
         } catch (IllegalArgumentException expected) {
             // Encode-side validation prevents malformed premium state from leaving the server.
+        }
+    }
+
+    private static void loginFailurePolicy() {
+        require(LoginFailurePolicy.decide(true, 3, 3, true, 2, true)
+                == LoginFailurePolicy.Action.TEMPBAN,
+            "temporary ban did not take precedence over kick/captcha");
+        require(LoginFailurePolicy.decide(true, 2, 3, true, 2, true)
+                == LoginFailurePolicy.Action.CAPTCHA,
+            "captcha was not selected before the temporary-ban threshold");
+        require(LoginFailurePolicy.decide(false, 1, 3, false, 2, false)
+                == LoginFailurePolicy.Action.NONE,
+            "disabled login protections still selected an action");
+    }
+
+    private static void commandTokenPolicy() {
+        require(CommandTokenPolicy.isAllowed("/login", List.of("/login", "register")),
+            "slash-prefixed allow-list command was rejected");
+        require(CommandTokenPolicy.isAllowed("  /AUTHME   reload", List.of("authme")),
+            "command root was not normalized");
+        require(!CommandTokenPolicy.isAllowed("op", List.of("/login", "register")),
+            "unlisted command was accepted");
+    }
+
+    private static void quickCommandPolicy() {
+        require(QuickCommandPolicy.enabled(true, true, true),
+            "granted quick-command permission did not enable protection");
+        require(QuickCommandPolicy.enabled(true, false, false),
+            "missing permission provider disabled the quick-command guard");
+        require(!QuickCommandPolicy.enabled(true, false, true),
+            "permission-provider denial did not disable the opt-in guard");
+        require(QuickCommandPolicy.enabled(false, false, true),
+            "disabled permission checks did not preserve the configured guard");
+    }
+
+    private static void emailAddressPolicy() {
+        require(EmailAddressPolicy.isValid("player+auth@example.test"),
+            "valid email address was rejected");
+        require(!EmailAddressPolicy.isValid("player..two@example.test"),
+            "consecutive-dot local part was accepted");
+        require(!EmailAddressPolicy.isValid("player@example..test"),
+            "empty domain label was accepted");
+        require(!EmailAddressPolicy.isValid("player@-example.test"),
+            "domain label with a leading hyphen was accepted");
+        require(!EmailAddressPolicy.isValid("player@example.test\r\nBcc: attacker@example.test"),
+            "header-injection email was accepted");
+        require(!EmailAddressPolicy.isValid("a".repeat(250) + "@example.test"),
+            "oversized email address was accepted");
+    }
+
+    private static void purgePathSafety() {
+        try {
+            Path parent = Files.createTempDirectory("authme-purge-selftest-");
+            Path root = parent.resolve("server");
+            Path outside = parent.resolve("outside");
+            UUID uuid = UUID.randomUUID();
+            Path outsideFile = outside.resolve(uuid + ".dat");
+            Path playerData = root.resolve("world").resolve("playerdata");
+            Files.createDirectories(playerData.getParent());
+            Files.createDirectories(outside);
+            Files.writeString(outsideFile, "must survive");
+            try {
+                Files.createSymbolicLink(playerData, outside);
+            } catch (UnsupportedOperationException | java.nio.file.FileSystemException unsupported) {
+                // Some CI filesystems disable symlink creation; the remaining self-tests still
+                // cover the parser and authentication boundary on those platforms.
+                return;
+            }
+
+            Path configDirectory = root.resolve("config").resolve("authme");
+            Files.createDirectories(configDirectory);
+            Files.writeString(configDirectory.resolve("config.yml"), """
+                Purge:
+                  removePlayerDat: true
+                  defaultWorld: world
+                """);
+            AuthMeConfig config = new AuthMeConfig(configDirectory);
+            require(config.load(), "purge safety configuration did not load");
+            PlayerAuth account = PlayerAuth.builder().name("purge_player").realName("Purge_Player")
+                .uuid(uuid).build();
+            require(PurgeFileCleaner.clean(root, config, List.of(account), true) == 0,
+                "purge followed a parent symlink outside the server root");
+            require(Files.exists(outsideFile), "purge deleted a file outside the server root");
+
+            Files.delete(playerData);
+            Files.createDirectories(playerData);
+            Path finalTarget = parent.resolve("outside-final.dat");
+            Files.writeString(finalTarget, "must survive");
+            Files.createSymbolicLink(playerData.resolve(uuid + ".dat"), finalTarget);
+            require(PurgeFileCleaner.clean(root, config, List.of(account), true) == 0,
+                "purge followed a final symlink outside the server root");
+            require(Files.exists(finalTarget), "purge deleted a final symlink target");
+        } catch (Exception exception) {
+            throw new AssertionError("purge path safety test failed", exception);
+        }
+    }
+
+    private static void antiBotState() {
+        try {
+            Path directory = Files.createTempDirectory("authme-antibot-selftest-");
+            Files.writeString(directory.resolve("config.yml"), """
+                AntiBot:
+                  enableAntiBot: true
+                  antibotInterval: 60
+                  antibotThreshold: 2
+                  antibotDuration: 1
+                  antibotDelay: 0
+                """);
+            AuthMeConfig config = new AuthMeConfig(directory);
+            require(config.load(), "AntiBot test configuration did not load");
+            AntiBotManager antiBot = new AntiBotManager(config);
+            require(!antiBot.notifyJoin("192.0.2.1"), "AntiBot activated before its threshold");
+            require(antiBot.notifyJoin("192.0.2.2"), "AntiBot threshold activation was not reported");
+            require(antiBot.shouldBlockNewJoins(), "AntiBot did not block inside its safety window");
+            require(!antiBot.notifyJoin("192.0.2.3"), "AntiBot repeated its activation notification");
+            antiBot.setEnabled(false);
+            require(!antiBot.shouldBlockNewJoins(), "disabled AntiBot still blocked a join");
+        } catch (Exception e) {
+            throw new AssertionError("AntiBot state test failed", e);
         }
     }
 

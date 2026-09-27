@@ -1,6 +1,7 @@
 package io.github.authme.fabric.mail;
 
 import io.github.authme.fabric.config.AuthMeConfig;
+import io.github.authme.fabric.auth.EmailAddressPolicy;
 import io.github.authme.fabric.util.Log;
 
 import javax.net.ssl.SSLSocket;
@@ -22,9 +23,10 @@ public final class EmailSender {
     }
 
     public static boolean send(AuthMeConfig config, String recipient, String subject, String body) {
-        if (!config.emailEnabled() || !validHeaderValue(recipient) || !validHeaderValue(subject)) return false;
+        if (!config.emailEnabled() || !EmailAddressPolicy.isValid(recipient)
+            || !validHeaderValue(subject)) return false;
         String from = config.emailFrom();
-        if (!validHeaderValue(from)) return false;
+        if (!EmailAddressPolicy.isValid(from)) return false;
         String configuredSubject = config.emailSubject();
         String effectiveSubject = configuredSubject == null || configuredSubject.isBlank()
             || "AuthMe".equals(configuredSubject) ? subject : configuredSubject;
@@ -33,9 +35,8 @@ public final class EmailSender {
         Socket socket = null;
         try {
             SSLSocketFactory sslFactory = (SSLSocketFactory) SSLSocketFactory.getDefault();
-            socket = config.emailSsl()
-                ? sslFactory.createSocket()
-                : new Socket();
+            socket = config.emailSsl() ? sslFactory.createSocket() : new Socket();
+            if (socket instanceof SSLSocket ssl) configureTls(ssl, config);
             socket.connect(new InetSocketAddress(config.emailHost(), config.emailPort()), config.emailTimeoutMillis());
             socket.setSoTimeout(config.emailTimeoutMillis());
             if (socket instanceof SSLSocket ssl) ssl.startHandshake();
@@ -47,6 +48,7 @@ public final class EmailSender {
                 SSLSocket tls = (SSLSocket) sslFactory.createSocket(
                     socket, config.emailHost(), config.emailPort(), true);
                 tls.setSoTimeout(config.emailTimeoutMillis());
+                configureTls(tls, config);
                 tls.startHandshake();
                 socket = tls;
                 smtp = new Smtp(socket);
@@ -83,6 +85,13 @@ public final class EmailSender {
             return address;
         }
         return "\"" + name + "\" <" + address + ">";
+    }
+
+    private static void configureTls(SSLSocket socket, AuthMeConfig config) {
+        if (!config.emailVerifyCertificate()) return;
+        javax.net.ssl.SSLParameters parameters = socket.getSSLParameters();
+        parameters.setEndpointIdentificationAlgorithm("HTTPS");
+        socket.setSSLParameters(parameters);
     }
 
     private static final class Smtp {

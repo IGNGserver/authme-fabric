@@ -1,0 +1,259 @@
+name: AuthMe
+version: 6.0.1-fabric.2-SNAPSHOT
+main: io.github.authme.platform.spigot.legacy.AuthMeSpigotLegacyPlugin
+api-version: '1.13'
+author: AuthMe
+description: AuthMe account authentication for Spigot 1.16.5+
+softdepend: [Citizens, CombatTag, CombatTagPlus, PlaceholderAPI, LuckPerms]
+commands:
+  authme:
+    description: AuthMe administration and version command
+  login:
+    description: Log into your AuthMe account
+    aliases: [l, log]
+  register:
+    description: Register an AuthMe account
+    aliases: [reg]
+  logout:
+    description: Log out of your AuthMe account
+  unregister:
+    description: Remove your AuthMe account
+    aliases: [unreg]
+  changepassword:
+    description: Change your AuthMe password
+    aliases: [changepass, cp]
+  2fa:
+    description: Verify or manage two-factor authentication
+    aliases: [totp]
+  captcha:
+    description: Complete the login CAPTCHA
+  verification:
+    description: Confirm an AuthMe email verification code
+  email:
+    description: Manage or recover an AuthMe email address
+  premium:
+    description: Enable verified Premium identity for this account
+  freemium:
+    description: Disable Premium identity for this account
+permissions:
+  authme.admin:
+    default: op
+    children:
+      authme.admin.*: true
+  authme.admin.*:
+    default: op
+    children:
+      authme.admin.accounts: true
+      authme.admin.antibotmessages: true
+      authme.admin.backup: true
+      authme.admin.changemail: true
+      authme.admin.changepassword: true
+      authme.admin.converter: true
+      authme.admin.firstspawn: true
+      authme.admin.forcelogin: true
+      authme.admin.getemail: true
+      authme.admin.getip: true
+      authme.admin.lastlogin: true
+      authme.admin.purge: true
+      authme.admin.purgebannedplayers: true
+      authme.admin.purgelastpos: true
+      authme.admin.purgeplayer: true
+      authme.admin.register: true
+      authme.admin.reload: true
+      authme.admin.seeotheraccounts: true
+      authme.admin.seerecent: true
+      authme.admin.setfirstspawn: true
+      authme.admin.setfreemium: true
+      authme.admin.setpremium: true
+      authme.admin.setspawn: true
+      authme.admin.spawn: true
+      authme.admin.switchantibot: true
+      authme.admin.totpdisable: true
+      authme.admin.totpviewstatus: true
+      authme.admin.unregister: true
+      authme.admin.updatemessages: true
+  authme.admin.reload:
+    default: op
+  authme.admin.register:
+    default: op
+  authme.admin.unregister:
+    default: op
+  authme.admin.changepassword:
+    default: op
+  authme.admin.forcelogin:
+    default: op
+  authme.admin.lastlogin:
+    default: op
+  authme.admin.getip:
+    default: op
+  authme.admin.accounts:
+    default: op
+  authme.admin.seeotheraccounts:
+    default: op
+  authme.admin.converter:
+    default: op
+  authme.admin.switchantibot:
+    default: op
+  authme.admin.updatemessages:
+    default: op
+  authme.admin.seerecent:
+    default: op
+  authme.admin.purge:
+    default: op
+  authme.admin.backup:
+    default: op
+  authme.admin.changemail:
+    default: op
+  authme.admin.getemail:
+    default: op
+  authme.admin.totpviewstatus:
+    default: op
+  authme.admin.totpdisable:
+    default: op
+  authme.admin.setpremium:
+    default: op
+  authme.admin.setfreemium:
+    default: op
+  authme.admin.spawn:
+    default: op
+  authme.admin.setspawn:
+    default: op
+  authme.admin.firstspawn:
+    default: op
+  authme.admin.setfirstspawn:
+    default: op
+  authme.admin.purgelastpos:
+    default: op
+  authme.admin.purgeplayer:
+    default: op
+  authme.admin.purgebannedplayers:
+    default: op
+  authme.admin.antibotmessages:
+    default: op
+  authme.debug.*:
+    default: op
+    children:
+      authme.debug.command: true
+      authme.debug.country: true
+      authme.debug.db: true
+      authme.debug.group: true
+      authme.debug.limbo: true
+      authme.debug.mail: true
+      authme.debug.mysqldef: true
+      authme.debug.perm: true
+      authme.debug.spawn: true
+      authme.debug.stats: true
+      authme.debug.valid: true
+  authme.debug.command:
+    default: op
+  authme.debug.country:
+    default: op
+  authme.debug.db:
+    default: op
+  authme.debug.group:
+    default: op
+  authme.debug.limbo:
+    default: op
+  authme.debug.mail:
+    default: op
+  authme.debug.mysqldef:
+    default: op
+  authme.debug.perm:
+    default: op
+  authme.debug.spawn:
+    default: op
+  authme.debug.stats:
+    default: op
+  authme.debug.valid:
+    default: op
+  authme.allowchatbeforelogin:
+    default: false
+  authme.allowmultipleaccounts:
+    default: false
+  authme.bypassantibot:
+    default: false
+  authme.bypassbungeesend:
+    default: false
+  authme.bypasscountrycheck:
+    default: false
+  authme.bypassforcesurvival:
+    default: false
+  authme.bypasspurge:
+    default: false
+  authme.player.*:
+    default: true
+    children:
+      authme.player.login: true
+      authme.player.register: true
+      authme.player.logout: true
+      authme.player.unregister: true
+      authme.player.canbeforced: true
+      authme.player.seeownaccounts: true
+      authme.player.protection.quickcommandsprotection: true
+      authme.player.changepassword: true
+      authme.player.captcha: true
+      authme.player.security.verificationcode: true
+      authme.player.totpadd: true
+      authme.player.totp: true
+      authme.player.totpremove: true
+      authme.player.email: true
+      authme.player.premium: true
+      authme.player.freemium: true
+  authme.player:
+    default: true
+    children:
+      authme.player.*: true
+  authme.player.login:
+    default: true
+  authme.player.register:
+    default: true
+  authme.player.logout:
+    default: true
+  authme.player.unregister:
+    default: true
+  authme.player.canbeforced:
+    default: true
+  authme.player.seeownaccounts:
+    default: true
+  authme.player.protection.quickcommandsprotection:
+    default: true
+  authme.player.changepassword:
+    default: true
+  authme.player.captcha:
+    default: true
+  authme.player.security.verificationcode:
+    default: true
+  authme.player.totpadd:
+    default: true
+  authme.player.totp:
+    default: true
+  authme.player.totpremove:
+    default: true
+  authme.player.email.add:
+    default: true
+  authme.player.email:
+    default: true
+    children:
+      authme.player.email.*: true
+  authme.player.email.*:
+    default: true
+    children:
+      authme.player.email.add: true
+      authme.player.email.change: true
+      authme.player.email.confirm: true
+      authme.player.email.recover: true
+      authme.player.email.see: true
+  authme.player.email.change:
+    default: true
+  authme.player.email.recover:
+    default: true
+  authme.player.email.confirm:
+    default: true
+  authme.player.email.see:
+    default: true
+  authme.player.premium:
+    default: true
+  authme.player.freemium:
+    default: true
+  authme.vip:
+    default: false

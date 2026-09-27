@@ -5,11 +5,9 @@ import com.mojang.brigadier.arguments.StringArgumentType;
 import com.mojang.brigadier.context.CommandContext;
 
 import io.github.authme.fabric.AuthMe;
-import io.github.authme.fabric.AuthMeFabric;
 import io.github.authme.fabric.auth.AuthManager;
 import io.github.authme.fabric.util.MinecraftText;
 import io.github.authme.fabric.util.PermissionBridge;
-import net.minecraft.commands.CommandBuildContext;
 import net.minecraft.commands.CommandSourceStack;
 import net.minecraft.commands.Commands;
 import net.minecraft.server.level.ServerPlayer;
@@ -29,7 +27,7 @@ public final class AuthMeCommands {
     private AuthMeCommands() {
     }
 
-    public static void register(CommandDispatcher<CommandSourceStack> dispatcher, CommandBuildContext ctx, Commands.CommandSelection sel) {
+    public static void register(CommandDispatcher<CommandSourceStack> dispatcher) {
         login(dispatcher, "login");
         login(dispatcher, "l");
         login(dispatcher, "log");
@@ -65,7 +63,7 @@ public final class AuthMeCommands {
             .then(Commands.argument("password", StringArgumentType.greedyString())
 
                 .executes(ctx -> {
-                    ServerPlayer p = ctx.getSource().getPlayer();
+                    ServerPlayer p = player(ctx.getSource());
                     if (p == null) { reply(ctx, "&cThis command can only be run by a player."); return 0; }
                     AuthManager m = mgrOrReply(p, ctx); if (m == null) return 0;
                     m.login(p, StringArgumentType.getString(ctx, "password"));
@@ -87,7 +85,7 @@ public final class AuthMeCommands {
     }
 
     private static int registerFromCommand(CommandContext<CommandSourceStack> ctx) {
-        ServerPlayer p = ctx.getSource().getPlayer();
+        ServerPlayer p = player(ctx.getSource());
         if (p == null) { reply(ctx, "&cThis command can only be run by a player."); return 0; }
         AuthManager m = mgrOrReply(p, ctx); if (m == null) return 0;
         String first = StringArgumentType.getString(ctx, "registrationFirst");
@@ -111,7 +109,7 @@ public final class AuthMeCommands {
                 .then(Commands.argument("oldpassword", StringArgumentType.string())
                     .then(Commands.argument("newpassword", StringArgumentType.greedyString())
                         .executes(ctx -> {
-                            ServerPlayer p = ctx.getSource().getPlayer();
+                            ServerPlayer p = player(ctx.getSource());
                             if (p == null) { reply(ctx, "&cThis command can only be run by a player."); return 0; }
                             AuthManager m = mgrOrReply(p, ctx); if (m == null) return 0;
                             m.changePassword(p, StringArgumentType.getString(ctx, "oldpassword"), StringArgumentType.getString(ctx, "newpassword"));
@@ -126,7 +124,7 @@ public final class AuthMeCommands {
             .requires(src -> hasPlayerPermission(src, "authme.player.logout"))
             .then(playerHelpBranch("logout"))
             .executes(ctx -> {
-                ServerPlayer p = ctx.getSource().getPlayer();
+                ServerPlayer p = player(ctx.getSource());
                 if (p == null) { reply(ctx, "&cThis command can only be run by a player."); return 0; }
                 AuthManager m = mgrOrReply(p, ctx); if (m == null) return 0;
                 m.logout(p);
@@ -140,7 +138,7 @@ public final class AuthMeCommands {
             .then(playerHelpBranch("unregister"))
             .then(Commands.argument("password", StringArgumentType.greedyString())
                 .executes(ctx -> {
-                    ServerPlayer p = ctx.getSource().getPlayer();
+                    ServerPlayer p = player(ctx.getSource());
                     if (p == null) { reply(ctx, "&cThis command can only be run by a player."); return 0; }
                     AuthManager m = mgrOrReply(p, ctx); if (m == null) return 0;
 
@@ -157,7 +155,7 @@ public final class AuthMeCommands {
             .requires(src -> hasPlayerPermission(src, "authme.player.security.verificationcode"))
             .then(playerHelpBranch("verification"))
             .then(Commands.argument("code", StringArgumentType.string()).executes(ctx -> {
-                ServerPlayer p = ctx.getSource().getPlayer(); if (p == null) return 0;
+                ServerPlayer p = player(ctx.getSource()); if (p == null) return 0;
                 AuthManager m = mgrOrReply(p, ctx); if (m == null) return 0;
                 String code = StringArgumentType.getString(ctx, "code");
                 if ("help".equalsIgnoreCase(code)) return playerHelp(ctx, "verification");
@@ -172,7 +170,7 @@ public final class AuthMeCommands {
             .then(playerHelpBranch("captcha"))
             .then(Commands.argument("code", StringArgumentType.greedyString())
                 .executes(ctx -> {
-                    ServerPlayer p = ctx.getSource().getPlayer();
+                    ServerPlayer p = player(ctx.getSource());
                     if (p == null) return 0;
                     AuthManager m = mgrOrReply(p, ctx); if (m == null) return 0;
                     String code = StringArgumentType.getString(ctx, "code");
@@ -188,20 +186,20 @@ public final class AuthMeCommands {
         d.register(Commands.literal(name)
             .then(playerHelpBranch("totp"))
             .then(Commands.literal("add").requires(src -> hasPlayerPermission(src, "authme.player.totpadd")).executes(ctx -> {
-                ServerPlayer p = ctx.getSource().getPlayer();
+                ServerPlayer p = player(ctx.getSource());
                 if (p == null) return 0;
                 AuthManager m = mgrOrReply(p, ctx); if (m == null) return 0;
                 m.totpEnable(p);
                 return 1;
             }))
             .then(Commands.literal("confirm").requires(src -> hasPlayerPermission(src, "authme.player.totpadd")).then(Commands.argument("code", StringArgumentType.string()).executes(ctx -> {
-                ServerPlayer p = ctx.getSource().getPlayer();
+                ServerPlayer p = player(ctx.getSource());
                 if (p == null) return 0;
                 AuthManager m = mgrOrReply(p, ctx); if (m == null) return 0;
                 m.totpConfirm(p, StringArgumentType.getString(ctx, "code")); return 1;
             })))
             .then(Commands.literal("code").then(Commands.argument("code", StringArgumentType.string()).executes(ctx -> {
-                ServerPlayer p = ctx.getSource().getPlayer();
+                ServerPlayer p = player(ctx.getSource());
                 if (p == null) return 0;
                 AuthManager m = mgrOrReply(p, ctx); if (m == null) return 0;
                 m.totpVerify(p, StringArgumentType.getString(ctx, "code")); return 1;
@@ -209,7 +207,7 @@ public final class AuthMeCommands {
             .then(Commands.literal("remove").requires(src -> hasPlayerPermission(src, "authme.player.totpremove"))
                 .then(Commands.argument("code", StringArgumentType.string())
                     .executes(ctx -> {
-                        ServerPlayer p = ctx.getSource().getPlayer();
+                        ServerPlayer p = player(ctx.getSource());
                         if (p == null) return 0;
                         AuthManager m = mgrOrReply(p, ctx); if (m == null) return 0;
                 m.totpDisable(p, StringArgumentType.getString(ctx, "code"));
@@ -217,7 +215,7 @@ public final class AuthMeCommands {
             })))
             .then(Commands.argument("totpCode", StringArgumentType.string())
                 .executes(ctx -> {
-                    ServerPlayer p = ctx.getSource().getPlayer();
+                    ServerPlayer p = player(ctx.getSource());
                     if (p == null) return 0;
                     AuthManager m = mgrOrReply(p, ctx); if (m == null) return 0;
                     String code = StringArgumentType.getString(ctx, "totpCode");
@@ -236,7 +234,7 @@ public final class AuthMeCommands {
                 .then(Commands.argument("email", StringArgumentType.string())
                     .then(Commands.argument("verifyemail", StringArgumentType.string())
                         .executes(ctx -> {
-                            ServerPlayer p = ctx.getSource().getPlayer();
+                            ServerPlayer p = player(ctx.getSource());
                             if (p == null) return 0;
                             AuthManager m = mgrOrReply(p, ctx); if (m == null) return 0;
                             m.emailAdd(p, StringArgumentType.getString(ctx, "email"), StringArgumentType.getString(ctx, "verifyemail"));
@@ -247,7 +245,7 @@ public final class AuthMeCommands {
                 .then(Commands.argument("oldemail", StringArgumentType.string())
                     .then(Commands.argument("newemail", StringArgumentType.string())
                         .executes(ctx -> {
-                            ServerPlayer p = ctx.getSource().getPlayer();
+                            ServerPlayer p = player(ctx.getSource());
                             if (p == null) return 0;
                             AuthManager m = mgrOrReply(p, ctx); if (m == null) return 0;
                             m.emailChange(p, StringArgumentType.getString(ctx, "oldemail"), StringArgumentType.getString(ctx, "newemail"));
@@ -256,7 +254,7 @@ public final class AuthMeCommands {
             .then(Commands.literal("recover").requires(src -> hasPlayerPermission(src, "authme.player.email.recover"))
                 .then(Commands.argument("email", StringArgumentType.string())
                     .executes(ctx -> {
-                        ServerPlayer p = ctx.getSource().getPlayer();
+                        ServerPlayer p = player(ctx.getSource());
                         if (p == null) return 0;
                         AuthManager m = mgrOrReply(p, ctx); if (m == null) return 0;
                         m.emailRecover(p, StringArgumentType.getString(ctx, "email"));
@@ -265,7 +263,7 @@ public final class AuthMeCommands {
             .then(Commands.literal("code").requires(src -> hasPlayerPermission(src, "authme.player.email.recover"))
                 .then(Commands.argument("code", StringArgumentType.string())
                     .executes(ctx -> {
-                        ServerPlayer p = ctx.getSource().getPlayer();
+                        ServerPlayer p = player(ctx.getSource());
                         if (p == null) return 0;
                         AuthManager m = mgrOrReply(p, ctx); if (m == null) return 0;
                         m.emailConfirm(p, StringArgumentType.getString(ctx, "code"));
@@ -274,7 +272,7 @@ public final class AuthMeCommands {
             .then(Commands.literal("confirm").requires(src -> hasPlayerPermission(src, "authme.player.email.confirm"))
                 .then(Commands.argument("code", StringArgumentType.string())
                     .executes(ctx -> {
-                        ServerPlayer p = ctx.getSource().getPlayer();
+                        ServerPlayer p = player(ctx.getSource());
                         if (p == null) return 0;
                         AuthManager m = mgrOrReply(p, ctx); if (m == null) return 0;
                         m.emailConfirm(p, StringArgumentType.getString(ctx, "code"));
@@ -283,14 +281,14 @@ public final class AuthMeCommands {
             .then(Commands.literal("setpassword").requires(src -> hasPlayerPermission(src, "authme.player.email.recover"))
                 .then(Commands.argument("password", StringArgumentType.greedyString())
                     .executes(ctx -> {
-                        ServerPlayer p = ctx.getSource().getPlayer();
+                        ServerPlayer p = player(ctx.getSource());
                         if (p == null) return 0;
                         AuthManager m = mgrOrReply(p, ctx); if (m == null) return 0;
                         m.emailSetRecoveredPassword(p, StringArgumentType.getString(ctx, "password"));
                         return 1;
                     })))
             .then(Commands.literal("show").requires(src -> hasPlayerPermission(src, "authme.player.email.see")).executes(ctx -> {
-                ServerPlayer p = ctx.getSource().getPlayer();
+                ServerPlayer p = player(ctx.getSource());
                 if (p == null) return 0;
                 AuthManager m = mgrOrReply(p, ctx); if (m == null) return 0;
                 m.emailShow(p);
@@ -306,7 +304,7 @@ public final class AuthMeCommands {
             .requires(src -> hasPlayerPermission(src, disable ? "authme.player.freemium" : "authme.player.premium"))
             .then(playerHelpBranch(disable ? "freemium" : "premium"))
             .executes(ctx -> {
-            ServerPlayer p = ctx.getSource().getPlayer();
+            ServerPlayer p = player(ctx.getSource());
             if (p == null) { reply(ctx, "&cThis command can only be run by a player."); return 0; }
             AuthManager m = mgrOrReply(p, ctx); if (m == null) return 0;
             if (disable) m.premiumDisable(p); else m.premiumEnable(p);
@@ -316,8 +314,11 @@ public final class AuthMeCommands {
 
     // ------------------------------------------------- /authme <admin>
     private static void authme(CommandDispatcher<CommandSourceStack> d) {
+        // The upstream command tree exposes /authme help and /authme version without an
+        // admin node; every mutating/diagnostic child below still has its own requirement.
+        // Keeping a requirement on the root would make those documented public commands
+        // unreachable for ordinary players.
         d.register(Commands.literal("authme")
-            .requires(AuthMeCommands::hasAnyAdminPermission)
             .then(Commands.literal("register").requires(src -> hasAdminPermission(src, "authme.admin.register"))
                 .then(Commands.argument("player", StringArgumentType.word())
                     .then(Commands.argument("password", StringArgumentType.greedyString())
@@ -368,7 +369,10 @@ public final class AuthMeCommands {
                     AuthManager m = checkMgr(ctx); if (m == null) return 0;
                     m.adminGetIp(StringArgumentType.getString(ctx, "player").toLowerCase(java.util.Locale.ROOT), message -> reply(ctx, message)); return 1;
                 })))
-            .then(Commands.literal("email").executes(AuthMeCommands::adminEmailSelf)
+            .then(Commands.literal("email")
+                .requires(src -> hasAdminPermission(src, "authme.admin.getemail")
+                    || hasAdminPermission(src, "authme.admin.changemail"))
+                .executes(AuthMeCommands::adminEmailSelf)
                 .then(Commands.literal("get").requires(src -> hasAdminPermission(src, "authme.admin.getemail")).then(Commands.argument("player", StringArgumentType.word()).executes(ctx -> {
                     AuthManager m = checkMgr(ctx); if (m == null) return 0;
                     m.adminGetEmail(StringArgumentType.getString(ctx, "player").toLowerCase(java.util.Locale.ROOT), message -> reply(ctx, message)); return 1;
@@ -482,7 +486,7 @@ public final class AuthMeCommands {
                 int limit; try { limit = Integer.parseInt(StringArgumentType.getString(ctx, "limit")); } catch (NumberFormatException e) { limit = 10; }
                 m.recent(limit, message -> reply(ctx, message)); return 1;
             })).executes(ctx -> { AuthManager m = checkMgr(ctx); if (m == null) return 0; m.recent(10, message -> reply(ctx, message)); return 1; }))
-            .then(Commands.literal("debug")
+            .then(Commands.literal("debug").requires(src -> hasAdminPermission(src, "authme.debug.command"))
                 .then(Commands.argument("child", StringArgumentType.word())
                     .executes(ctx -> adminDebug(ctx, StringArgumentType.getString(ctx, "child"), null, null))
                     .then(Commands.argument("arg1", StringArgumentType.word())
@@ -503,7 +507,7 @@ public final class AuthMeCommands {
                 return 1;
             }))
             .then(Commands.literal("version").executes(ctx -> {
-                reply(ctx, "&aAuthMe Fabric&7v" + AuthMeFabric.version() + " &a- Fabric port of AuthMeReloaded (GPL-3.0).");
+                reply(ctx, "&aAuthMe Fabric&7v" + AuthMe.version() + " &a- Fabric port of AuthMeReloaded (GPL-3.0).");
                 return 1;
             }))
             .then(Commands.literal("help")
@@ -553,7 +557,7 @@ public final class AuthMeCommands {
     }
 
     private static int adminAuthSelf(CommandContext<CommandSourceStack> ctx) {
-        ServerPlayer player = ctx.getSource().getPlayer();
+        ServerPlayer player = player(ctx.getSource());
         if (player == null) { reply(ctx, AuthMe.get().message("admin.notPlayer")); return 0; }
         AuthManager m = checkMgr(ctx); if (m == null) return 0;
         m.adminAuth(player.getName().getString().toLowerCase(java.util.Locale.ROOT), message -> reply(ctx, message));
@@ -561,21 +565,21 @@ public final class AuthMeCommands {
     }
 
     private static int adminAccountDataSelf(CommandContext<CommandSourceStack> ctx) {
-        ServerPlayer player = ctx.getSource().getPlayer();
+        ServerPlayer player = player(ctx.getSource());
         if (player == null) { reply(ctx, AuthMe.get().message("admin.notPlayer")); return 0; }
         AuthManager m = checkMgr(ctx); if (m == null) return 0;
         m.accountData(player.getName().getString().toLowerCase(java.util.Locale.ROOT), message -> reply(ctx, message)); return 1;
     }
 
     private static int adminAccountsSelf(CommandContext<CommandSourceStack> ctx) {
-        ServerPlayer player = ctx.getSource().getPlayer();
+        ServerPlayer player = player(ctx.getSource());
         if (player == null) { reply(ctx, AuthMe.get().message("admin.notPlayer")); return 0; }
         AuthManager m = checkMgr(ctx); if (m == null) return 0;
         m.accounts(player.getName().getString().toLowerCase(java.util.Locale.ROOT), message -> reply(ctx, message)); return 1;
     }
 
     private static int adminEmailSelf(CommandContext<CommandSourceStack> ctx) {
-        ServerPlayer player = ctx.getSource().getPlayer();
+        ServerPlayer player = player(ctx.getSource());
         if (player == null) { reply(ctx, AuthMe.get().message("admin.notPlayer")); return 0; }
         AuthManager m = checkMgr(ctx); if (m == null) return 0;
         m.adminGetEmail(player.getName().getString().toLowerCase(java.util.Locale.ROOT), message -> reply(ctx, message)); return 1;
@@ -606,6 +610,10 @@ public final class AuthMeCommands {
     }
 
     private static int adminDebug(CommandContext<CommandSourceStack> ctx, String child, String arg1, String arg2) {
+        if (!hasDebugPermission(ctx.getSource(), child)) {
+            reply(ctx, "&cYou do not have permission to use this debug section.");
+            return 0;
+        }
         AuthManager m = checkMgr(ctx); if (m == null) return 0;
         m.debug(child, arg1, arg2, message -> reply(ctx, message)); return 1;
     }
@@ -688,14 +696,14 @@ public final class AuthMeCommands {
     }
 
     private static int adminSpawn(CommandContext<CommandSourceStack> ctx, boolean first) {
-        ServerPlayer p = ctx.getSource().getPlayer();
+        ServerPlayer p = player(ctx.getSource());
         if (p == null) { reply(ctx, AuthMe.get().message("admin.notPlayer")); return 0; }
         AuthManager m = checkMgr(ctx); if (m == null) return 0;
         m.spawn(p, first, message -> reply(ctx, message)); return 1;
     }
 
     private static int adminSetSpawn(CommandContext<CommandSourceStack> ctx, boolean first) {
-        ServerPlayer p = ctx.getSource().getPlayer();
+        ServerPlayer p = player(ctx.getSource());
         if (p == null) { reply(ctx, AuthMe.get().message("admin.notPlayer")); return 0; }
         AuthManager m = checkMgr(ctx); if (m == null) return 0;
         m.setSpawn(p, first, message -> reply(ctx, message)); return 1;
@@ -703,14 +711,18 @@ public final class AuthMeCommands {
 
     private static AuthManager checkMgr(CommandContext<CommandSourceStack> ctx) {
         AuthMe am = AuthMe.get();
-        if (am == null || am.authManager() == null) { reply(ctx, "&cAuthMe is not ready yet."); return null; }
+        if (am == null || am.authManager() == null || !am.healthy()) {
+            reply(ctx, "&cAuthMe is unavailable because the database is not healthy.");
+            return null;
+        }
         return am.authManager();
     }
 
     private static boolean hasAdminPermission(CommandSourceStack source, String node) {
         if (source.getEntity() == null) return true;
         if (source.hasPermission(3)) return true;
-        return Boolean.TRUE.equals(PermissionBridge.check(source.getEntity().getUUID(), node));
+        return Boolean.TRUE.equals(PermissionBridge.check(source.getEntity().getUUID(), node))
+            || Boolean.TRUE.equals(PermissionBridge.check(source.getEntity().getUUID(), "authme.admin.*"));
     }
 
     private static boolean hasPlayerPermission(CommandSourceStack source, String node) {
@@ -718,7 +730,33 @@ public final class AuthMeCommands {
         AuthMe am = AuthMe.get();
         if (am == null || am.config() == null || !am.config().permissionCheckEnabled()) return true;
         Boolean decision = PermissionBridge.check(source.getEntity().getUUID(), node);
-        return decision == null || decision;
+        if (Boolean.TRUE.equals(decision)) return true;
+        if (Boolean.TRUE.equals(PermissionBridge.check(source.getEntity().getUUID(), "authme.player.*"))) return true;
+        if (node.startsWith("authme.player.email.")) {
+            Boolean email = PermissionBridge.check(source.getEntity().getUUID(), "authme.player.email");
+            if (Boolean.TRUE.equals(email)) return true;
+        }
+        return decision != null ? decision : !PermissionBridge.providerPresent();
+    }
+
+    private static boolean hasDebugPermission(CommandSourceStack source, String child) {
+        if (!hasAdminPermission(source, "authme.debug.command")) return false;
+        if (child == null || child.isBlank()) return true;
+        String node = switch (child.toLowerCase(java.util.Locale.ROOT)) {
+            case "country", "cty" -> "authme.debug.country";
+            case "db" -> "authme.debug.db";
+            case "group" -> "authme.debug.group";
+            case "limbo" -> "authme.debug.limbo";
+            case "mail" -> "authme.debug.mail";
+            case "mysqldef" -> "authme.debug.mysqldef";
+            case "perm" -> "authme.debug.perm";
+            case "spawn" -> "authme.debug.spawn";
+            case "stats" -> "authme.debug.stats";
+            case "valid" -> "authme.debug.valid";
+            default -> null;
+        };
+        // An unknown debug selector must not inherit the broad command permission.
+        return node != null && hasAdminPermission(source, node);
     }
 
     private static boolean hasAnyAdminPermission(CommandSourceStack source) {
@@ -737,6 +775,11 @@ public final class AuthMeCommands {
     }
 
     private static void reply(CommandContext<CommandSourceStack> ctx, String message) {
-        ctx.getSource().sendSuccess(() -> MinecraftText.toComponent(message), false);
+        ServerPlayer player = ctx.getSource().getEntity() instanceof ServerPlayer p ? p : null;
+        ctx.getSource().sendSuccess(() -> MinecraftText.toComponent(player, message), false);
+    }
+
+    private static ServerPlayer player(CommandSourceStack source) {
+        return source != null && source.getEntity() instanceof ServerPlayer p ? p : null;
     }
 }

@@ -23,6 +23,11 @@ public class Argon2 implements EncryptionMethod {
     protected static final int PARALLELISM = 1;
     protected static final int SALT_BYTES = 16;
     protected static final int HASH_BYTES = 32;
+    private static final int MAX_VERIFICATION_MEMORY_KB = 262_144;
+    private static final int MAX_VERIFICATION_ITERATIONS = 10;
+    private static final int MAX_VERIFICATION_PARALLELISM = 16;
+    private static final int MAX_VERIFICATION_SALT_BYTES = 1024;
+    private static final int MAX_VERIFICATION_HASH_BYTES = 1024;
 
     private final SecureRandom random = new SecureRandom();
 
@@ -60,6 +65,7 @@ public class Argon2 implements EncryptionMethod {
             int[] params = parseParams(parts[3]);
             byte[] salt = decodeNoPadding(parts[4]);
             byte[] expected = decodeNoPadding(parts[5]);
+            validateVerificationParameters(params, salt, expected);
             byte[] computed = derive(password.toCharArray(), salt, params[1], params[0], params[2], expected.length, getType());
             return MessageDigest.isEqual(computed, expected);
         } catch (IllegalArgumentException e) {
@@ -90,6 +96,19 @@ public class Argon2 implements EncryptionMethod {
         byte[] result = new byte[hashLen];
         generator.generateBytes(password, result);
         return result;
+    }
+
+    private static void validateVerificationParameters(int[] params, byte[] salt, byte[] expected) {
+        int memoryKb = params[0];
+        int iterations = params[1];
+        int parallelism = params[2];
+        if (iterations < 1 || iterations > MAX_VERIFICATION_ITERATIONS
+            || parallelism < 1 || parallelism > MAX_VERIFICATION_PARALLELISM
+            || memoryKb < parallelism * 8 || memoryKb > MAX_VERIFICATION_MEMORY_KB
+            || salt == null || salt.length < 8 || salt.length > MAX_VERIFICATION_SALT_BYTES
+            || expected == null || expected.length < 4 || expected.length > MAX_VERIFICATION_HASH_BYTES) {
+            throw new IllegalArgumentException("Unsafe Argon2 parameters");
+        }
     }
 
     private static int[] parseParams(String paramStr) {

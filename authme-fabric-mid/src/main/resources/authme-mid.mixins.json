@@ -6,7 +6,10 @@
   "mixins": [
     "CommandDispatcherMixin",
     "ContainerClickMixin",
+    "InventoryMenuMixin",
     "CommandSuggestionMixin",
+    "ChatBroadcastMixin",
+    "VipSlotMixin",
     "JoinMessageMixin",
     "LeaveMessageMixin"
   ],

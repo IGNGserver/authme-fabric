@@ -1,0 +1,340 @@
+# ===========================================================================
+# AuthMe Fabric configuration
+# ---------------------------------------------------------------------------
+# Keys are kept compatible with AuthMeReloaded's config.yml wherever possible,
+# so an existing AuthMe config can be dropped in with minimal changes.
+# This port reads only the keys documented below; unknown keys are ignored.
+# ===========================================================================
+
+DataSource:
+    # What type of database do you want to use?
+    # Valid values: SQLITE, MARIADB, MYSQL, POSTGRESQL
+    backend: SQLITE
+    # Remote databases default to VALIDATE so the runtime account needs DML only. During a
+    # controlled upgrade, run once with MIGRATE and a separate DDL-capable principal, then
+    # switch back to VALIDATE. SQLite defaults to MIGRATE for first-run bootstrapping.
+    schemaManagement: AUTO
+
+    # Enable the database caching system, should be disabled on bungeecord
+    # environments or when a website integration is being used.
+    caching: true
+    # Cache refresh/expiry bounds in seconds/minutes. Cache failures are never stored.
+    cacheRefreshSeconds: 300
+    cacheExpireMinutes: 15
+
+    # Database host address
+    mySQLHost: '127.0.0.1'
+    # Database port
+    mySQLPort: '3306'
+    # Connect to MySQL database over SSL
+    mySQLUseSSL: true
+    # Verification of server's certificate.
+    mySQLCheckServerCertificate: true
+    # Explicit TLS policy used by MySQL, MariaDB and PostgreSQL. VERIFY_IDENTITY
+    # validates both the certificate chain and the database host name.
+    tlsMode: VERIFY_IDENTITY
+    # Authorize client to retrieve RSA server public key.
+    mySQLAllowPublicKeyRetrieval: true
+
+    # Username to connect to the MySQL database
+    mySQLUsername: 'authme'
+    # Set a unique strong password before switching the backend to MySQL/MariaDB.
+    mySQLPassword: ''
+    # Database Name, use with converters or as SQLITE database name
+    mySQLDatabase: 'authme'
+    # Table of the database
+    mySQLTablename: 'authme'
+
+    # Column names (keep identical to your AuthMe/Spigot table to share data)
+    mySQLColumnId: 'id'
+    mySQLColumnName: 'username'
+    mySQLRealName: 'realname'
+    mySQLColumnPassword: 'password'
+    # Leave empty for no separate salt column (SHA256 stores salt inside the hash)
+    mySQLColumnSalt: ''
+    mySQLColumnEmail: 'email'
+    mySQLColumnLogged: 'isLogged'
+    mySQLColumnHasSession: 'hasSession'
+    mySQLColumnIp: 'ip'
+    mySQLColumnLastLogin: 'lastlogin'
+    mySQLColumnRegisterDate: 'regdate'
+    mySQLColumnRegisterIp: 'regip'
+    mySQLlastlocX: 'x'
+    mySQLlastlocY: 'y'
+    mySQLlastlocZ: 'z'
+    mySQLlastlocWorld: 'world'
+    mySQLlastlocYaw: 'yaw'
+    mySQLlastlocPitch: 'pitch'
+    mySQLtotpKey: 'totp'
+    mySQLColumnPremiumUUID: 'premiumUUID'
+    mySQLPlayerUUID: ''
+
+    # Overrides the size of the DB Connection Pool, default = 10
+    poolSize: 10
+    # The maximum lifetime of a connection in the pool, default = 1800 seconds
+    maxLifetime: 1800
+
+settings:
+    security:
+        # Stop the server if we can't contact the sql database
+        SQLProblem:
+            stopServer: true
+        # Minimum length of password
+        minPasswordLength: 5
+        # Maximum length of password
+        passwordMaxLength: 30
+        # Possible values: ARGON2ID, ARGON2, BCRYPT, BCRYPT2Y, PBKDF2, PBKDF2BASE64,
+        # SALTEDSHA512, SALTEDSHA256, SALTED2MD5, SHA512,
+        # SHA1, MD5, DOUBLESHA512, PLAINTEXT
+        passwordHash: ARGON2ID
+        # Legacy primary algorithms are rejected unless this migration-only switch is explicit.
+        allowWeakPasswordHash: false
+        # Salt length for SALTED2MD5: MD5(MD5(password)+salt)
+        doubleMD5SaltLength: 8
+        # Number of rounds to use if passwordHash is set to PBKDF2
+        pbkdf2Rounds: 10000
+        # Prevent unsafe passwords from being used
+        unsafePasswords: ['123456', 'password', 'qwerty', '12345', '54321', '123456789', 'help']
+        captcha:
+            useCaptcha: false
+            maxLoginTry: 5
+            captchaLength: 5
+            captchaCountReset: 60
+            requireForRegistration: false
+        tempban:
+            enableTempban: false
+            maxLoginTries: 10
+            tempbanLength: 480
+            minutesBeforeCounterReset: 480
+            customCommand: ''
+
+    registration:
+        # Enable registration
+        enabled: true
+        # Send every X seconds a message to register/login
+        force: true
+        messageInterval: 5
+        # Maximum number of new accounts from one IP address (0 disables the limit).
+        maxRegPerIp: 1
+        # PASSWORD asks the player for a password; EMAIL generates a password and mails it.
+        type: PASSWORD
+        # NONE, CONFIRMATION, EMAIL_OPTIONAL, or EMAIL_MANDATORY
+        secondArg: CONFIRMATION
+        # Take a player to the registration portal
+        forcePortalAfterRegister: false
+        forceKickAfterRegister: false
+        forceLoginAfterRegister: false
+        # Timeout in seconds to register, 0 to disable
+        timeout: 30
+        # Whether to kick players if their password is unsafe
+        delayForKicking: 0
+        # Message threshold to register
+        messageThreshold: 0
+        # Native Minecraft dialog UI on 1.21.11. Older supported modules safely use chat.
+        dialog:
+            postJoin:
+                enable: true
+            preJoin:
+                # Paper/Folia 1.21 configuration-phase dialog. Disabled by default because it
+                # requires a 1.21.6+ dialog-capable client and is not suitable for every proxy.
+                enable: false
+                showCancelButton: true
+                allowCloseWithEscape: false
+                loginCancelKicks: true
+                registerCancelKicks: false
+                timeout: 60
+            showForgotPasswordButton: true
+            showBody: true
+    useWelcomeMessage: true
+    broadcastWelcomeMessage: false
+    delayJoinMessage: false
+    customJoinMessage: ''
+    removeUnloggedLeaveMessage: false
+    removeJoinMessage: false
+    removeLeaveMessage: false
+    applyBlindEffect: false
+    serverName: 'Minecraft Server'
+
+    # Server-wide message language. Optional messages_<locale>.yml overrides are supported.
+    messagesLanguage: en
+    # When enabled, messages_<client locale>.yml is preferred for each player.
+    perPlayerLocale: true
+
+    restrictions:
+        # Restricted usernames and permitted IPs, one entry per line: player;127.0.0.* or player;regex:...
+        AllowRestrictedUser: false
+        AllowedRestrictedUser: []
+        # Allow unauthenticated players to send public chat messages.
+        allowChat: false
+        # Hide normal chat broadcasts from unauthenticated viewers.
+        hideChat: false
+        banUnsafedIP: false
+        noTeleport: false
+        kickOnWrongPassword: true
+        ForceSingleSession: true
+        removeSpeed: false
+        # Account names sharing an IP are private. Administrators also need
+        # authme.admin.seeotheraccounts before this diagnostic is shown.
+        displayOtherAccounts: false
+        otherAccountsThreshold: 0
+        otherAccountsCmd: ''
+        otherAccountsCmdThreshold: 5
+        # Maximum simultaneous logged-in players from one IP (0 disables the limit).
+        maxLoginPerIp: 0
+        # Maximum simultaneous joined players from one IP (0 disables the limit).
+        maxJoinPerIp: 0
+        enablePasswordVerifier: true
+        allowedPasswordCharacters: '[!-~]*'
+        registerTimeout: 30
+        loginTimeout: 30
+        ForceSpawnLocOnJoin:
+            enabled: false
+            worlds: ['world', 'world_nether', 'world_the_end']
+
+    unrestrictions:
+        # Names listed here bypass AuthMe authentication (use only for trusted NPC/mod accounts).
+        UnrestrictedName: []
+        # Case-insensitive display names of custom inventories that unauthenticated players may use.
+        # Keep this list narrow: matching an inventory grants slot interaction before login.
+        UnrestrictedInventories: []
+
+    session:
+        # Enable the session feature (login only once for a defined time)
+        enabled: false
+        # Session timeout in minutes
+        timeout: 60
+        # Only the player's IP can resume the session
+        # Session resumption always requires the last authenticated IP.
+        # These legacy names remain for config compatibility and cannot weaken
+        # the IP binding.
+        sessionOnlyIp: true
+        # Expire a session when the player's IP changes
+        sessionExpireOnIpChange: true
+
+    # Temporary unauthenticated-player state. This follows AuthMeReloaded's
+    # settings.limbo layout and survives a restart when persistence is enabled.
+    limbo:
+        persistence:
+            type: INDIVIDUAL_FILES
+            distributionSize: SIXTEEN
+        restoreAllowFlight: RESTORE
+        restoreFlySpeed: RESTORE_NO_ZERO
+        restoreWalkSpeed: RESTORE_NO_ZERO
+        recreateEnderPearls: true
+
+Hooks:
+    # BungeeCord/Velocity proxy forwarding verified premium UUIDs
+    bungeecord: false
+    sendPlayerTo: ''
+    # Must match the AuthMe proxy plugin. Empty rejects perform.login messages.
+    proxySharedSecret: ''
+    # Stable source identity authenticated in backend-to-proxy state messages.
+    proxyBackendId: 'backend'
+    # Displayname hook
+    displayname: false
+
+# Automatic logical database backup. Manual /authme backup remains available regardless of this switch.
+BackupSystem:
+    ActivateBackup: false
+    OnServerStart: false
+    OnServerStop: false
+    intervalHours: 0
+
+# Automatic removal of old AuthMe account records.
+Purge:
+    useAutoPurge: false
+    daysBeforeRemovePlayer: 60
+    purgeBannedPlayers: false
+    removePlayerDat: false
+    removeEssentialsFile: false
+    defaultWorld: 'world'
+    removeLimitedCreativesInventories: false
+    removeAntiXRayFile: false
+    removePermissions: false
+
+# E-mail recovery and optional e-mail verification. Disabled by default; configure a real SMTP
+# relay before enabling it. Credentials are read from this file and are never written to logs.
+Email:
+    enabled: false
+    host: '127.0.0.1'
+    port: 25
+    username: ''
+    password: ''
+    from: ''
+    senderName: 'AuthMe'
+    subject: 'AuthMe'
+    ssl: false
+    startTls: true
+    timeoutMillis: 10000
+    recoveryTimeoutSeconds: 600
+    recoveryCooldownSeconds: 60
+    recoveryMaxAttempts: 5
+    recoveryCodeLength: 8
+    passwordChangeTimeoutSeconds: 120
+    enableEmailMasking: false
+    # Maximum number of accounts which may use the same address (0 disables the limit).
+    maxRegPerEmail: 1
+    # Length of generated passwords in EMAIL registration mode.
+    RecoveryPasswordLength: 8
+    requireVerification: false
+
+ExternalBoardOptions:
+    # BCrypt log2 round factor
+    bCryptLog2Round: 10
+
+# AntiBot system
+AntiBot:
+    enableAntiBot: false
+    antibotInterval: 5
+    antibotThreshold: 8
+    antibotDuration: 10
+    antibotDelay: 60
+    antibotCommands: []
+
+# Country protection. Put a GeoLite2-Country/GeoIP2-Country .mmdb file in this
+# directory to use MaxMind data, or keep the small operator-managed CIDR CSV.
+Protection:
+    enableProtection: false
+    enableProtectionRegistered: true
+    quickCommands:
+        # Kick unauthenticated players who issue commands too soon after joining.
+        # Set to 0 to disable. The AuthMe player permission enables this guard when
+        # permission checks are active; remove that node to opt out through LuckPerms.
+        denyCommandsBeforeMilliseconds: 1000
+    geoIpDatabase:
+        enabled: true
+        failClosed: false
+        file: 'geoip-countries.csv'
+    countries: ['US', 'GB', 'LOCALHOST']
+    countriesBlacklist: ['A1']
+
+Settings:
+    permission:
+        EnablePermissionCheck: true
+    GameMode:
+        ForceSurvivalMode: false
+        ForceOnlyAfterLogin: false
+        ResetInventoryIfCreative: false
+    # Restrict unauthenticated players
+    restrictUnauthenticated:
+        allowMovement: false
+        # Allowed horizontal movement radius before login. Set to 0 for unlimited movement.
+        allowedMovementRadius: 100
+        # Commands usable before authentication
+        allowCommands: ['login', 'register', 'l', 'reg', 'authme', 'email', '2fa', 'totp', 'captcha']
+        # Hide tab-list until logged in
+        hideTablist: false
+        DenyTabCompleteBeforeLogin: false
+    # Save quit location
+    saveQuitLocation: false
+    # Timeouts
+    timeouts:
+        loginTimeout: 30
+        registerTimeout: 30
+
+GroupOptions:
+    # Requires LuckPerms. AuthMe uses transient positive/negative inheritance nodes;
+    # persistent user nodes are never cleared or saved.
+    enablePermissionCheck: false
+    registeredPlayerGroup: ''
+    unregisteredPlayerGroup: ''

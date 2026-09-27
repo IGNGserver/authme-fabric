@@ -12,6 +12,11 @@ public class MariaDBDataSource extends MySQLDataSource {
         super(settings);
     }
 
+    /** Opens an existing schema without issuing DDL. Use a SELECT-only database principal. */
+    public MariaDBDataSource(DbSettings settings, boolean readOnly) throws SQLException {
+        super(settings, readOnly);
+    }
+
     @Override
     protected String driverClassName() {
         return "org.mariadb.jdbc.Driver";
@@ -24,15 +29,23 @@ public class MariaDBDataSource extends MySQLDataSource {
 
     @Override
     protected String buildJdbcUrl() {
-        String ssl = settings.useSsl
-            ? "&sslMode=" + (settings.checkServerCertificate ? "verify-full" : "trust")
-            : "&sslMode=disabled";
+        String ssl = "&sslMode=" + mariaDbSslMode(settings.tlsMode);
         return "jdbc:mariadb://" + settings.host + ":" + settings.port + "/" + settings.database
-            + "?user=" + settings.user
-            + "&password=" + settings.password
-            + "&useUnicode=true&characterEncoding=utf8"
+            // Credentials are passed through the JDBC Properties object in the base class.
+            // Keeping them out of the URL prevents '&', '?' and '#' in a password from
+            // changing connection properties or leaking into URL-based diagnostics.
+            + "?useUnicode=true&characterEncoding=utf8"
             + ssl
             + (settings.allowPublicKeyRetrieval ? "&allowPublicKeyRetrieval=true" : "")
             + "&autoReconnect=true";
+    }
+
+    private static String mariaDbSslMode(DbSettings.TlsMode mode) {
+        return switch (mode) {
+            case DISABLED -> "disable";
+            case REQUIRED -> "trust";
+            case VERIFY_CA -> "verify-ca";
+            case VERIFY_IDENTITY -> "verify-full";
+        };
     }
 }

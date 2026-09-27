@@ -4,6 +4,8 @@ import java.sql.Connection;
 import java.sql.DriverManager;
 import java.sql.SQLException;
 import java.util.ArrayDeque;
+import java.util.IdentityHashMap;
+import java.util.Map;
 import java.util.Properties;
 
 /**
@@ -17,6 +19,7 @@ public final class SimpleConnectionPool {
     private final int maxSize;
     private final long maxLifetimeMillis;
     private final ArrayDeque<IdleConnection> idle = new ArrayDeque<>();
+    private final Map<Connection, Long> createdAt = new IdentityHashMap<>();
     private int inUse = 0;
     private boolean closed = false;
 
@@ -49,56 +52,78 @@ public final class SimpleConnectionPool {
      *
      * @throws SQLException if no connection can be obtained within the timeout
      */
-    public synchronized Connection borrow(long timeoutMillis) throws SQLException {
+    public Connection borrow(long timeoutMillis) throws SQLException {
         long deadline = System.currentTimeMillis() + Math.max(0, timeoutMillis);
-        while (!closed) {
-            while (!idle.isEmpty()) {
-                IdleConnection entry = idle.poll();
-                if (entry == null) break;
-                Connection c = entry.connection;
-                try {
-                    boolean youngEnough = maxLifetimeMillis <= 0
-                        || System.currentTimeMillis() - entry.createdAt < maxLifetimeMillis;
-                    if (youngEnough && !c.isClosed() && c.isValid(2)) {
-                        inUse++;
-                        return c;
+        while (true) {
+            synchronized (this) {
+                if (closed) throw new SQLException("Connection pool is closed");
+                while (!idle.isEmpty()) {
+                    IdleConnection entry = idle.poll();
+                    if (entry == null) break;
+                    Connection c = entry.connection;
+                    try {
+                        boolean youngEnough = maxLifetimeMillis <= 0
+                            || System.currentTimeMillis() - entry.createdAt < maxLifetimeMillis;
+                        if (youngEnough && !c.isClosed() && c.isValid(2)) {
+                            inUse++;
+                            return c;
+                        }
+                        discard(c);
+                    } catch (SQLException e) {
+                        discard(c);
                     }
-                    closeQuietly(c);
-                } catch (SQLException e) {
-                    closeQuietly(c);
+                }
+                if (inUse < maxSize) {
+                    // Reserve a slot, but establish the JDBC connection after leaving the monitor.
+                    // A slow or unavailable database must not prevent another thread from
+                    // returning a healthy borrowed connection to the pool.
+                    inUse++;
+                } else {
+                    long wait = deadline - System.currentTimeMillis();
+                    if (wait <= 0) {
+                        throw new SQLException("Connection pool exhausted (max=" + maxSize + ")");
+                    }
+                    try {
+                        wait(Math.min(wait, 1000));
+                    } catch (InterruptedException e) {
+                        Thread.currentThread().interrupt();
+                        throw new SQLException("Interrupted while waiting for a connection", e);
+                    }
+                    continue;
                 }
             }
-            if (inUse < maxSize) {
-                inUse++;
-                break;
-            }
-            long wait = deadline - System.currentTimeMillis();
-            if (wait <= 0) {
-                throw new SQLException("Connection pool exhausted (max=" + maxSize + ")");
-            }
+
+            Connection connection;
             try {
-                wait(Math.min(wait, 1000));
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
-                throw new SQLException("Interrupted while waiting for a connection", e);
+                connection = DriverManager.getConnection(jdbcUrl, props);
+            } catch (SQLException e) {
+                releaseReservation();
+                throw e;
+            }
+            synchronized (this) {
+                if (closed) {
+                    if (inUse > 0) inUse--;
+                    notifyAll();
+                    closeQuietly(connection);
+                    throw new SQLException("Connection pool is closed");
+                }
+                createdAt.put(connection, System.currentTimeMillis());
+                return connection;
             }
         }
-        if (closed) {
-            throw new SQLException("Connection pool is closed");
-        }
-        try {
-            return DriverManager.getConnection(jdbcUrl, props);
-        } catch (SQLException e) {
-            synchronized (this) { if (inUse > 0) inUse--; notifyAll(); }
-            throw e;
-        }
+    }
+
+    private synchronized void releaseReservation() {
+        if (inUse > 0) inUse--;
+        notifyAll();
     }
 
     public synchronized void release(Connection c) {
         if (c == null) return;
         if (inUse > 0) inUse--;
         if (closed) {
-            closeQuietly(c);
+            discard(c);
+            notifyAll();
             return;
         }
         try {
@@ -107,29 +132,40 @@ public final class SimpleConnectionPool {
                 c.setAutoCommit(true);
             }
         } catch (SQLException e) {
-            closeQuietly(c);
+            discard(c);
             notifyAll();
             return;
         }
         try {
             if (c.isClosed()) {
-                // drop
-            } else if (!c.isValid(1)) {
-                closeQuietly(c);
+                discard(c);
+            } else if (expired(c) || !c.isValid(1)) {
+                discard(c);
             } else {
-                idle.offer(new IdleConnection(c, System.currentTimeMillis()));
+                idle.offer(new IdleConnection(c, createdAt.getOrDefault(c, System.currentTimeMillis())));
             }
         } catch (SQLException e) {
-            closeQuietly(c);
+            discard(c);
         }
         notifyAll();
     }
 
     public synchronized void close() {
         closed = true;
-        for (IdleConnection entry : idle) closeQuietly(entry.connection);
+        for (IdleConnection entry : idle) discard(entry.connection);
         idle.clear();
         notifyAll();
+    }
+
+    private boolean expired(Connection c) {
+        Long created = createdAt.get(c);
+        return maxLifetimeMillis > 0 && created != null
+            && System.currentTimeMillis() - created >= maxLifetimeMillis;
+    }
+
+    private void discard(Connection c) {
+        createdAt.remove(c);
+        closeQuietly(c);
     }
 
     private static void closeQuietly(Connection c) {

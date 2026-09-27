@@ -10,6 +10,10 @@ DataSource:
     # What type of database do you want to use?
     # Valid values: SQLITE, MARIADB, MYSQL, POSTGRESQL
     backend: SQLITE
+    # Remote databases default to VALIDATE so the runtime account needs DML only. During a
+    # controlled upgrade, run once with MIGRATE and a separate DDL-capable principal, then
+    # switch back to VALIDATE. SQLite defaults to MIGRATE for first-run bootstrapping.
+    schemaManagement: AUTO
 
     # Enable the database caching system, should be disabled on bungeecord
     # environments or when a website integration is being used.
@@ -26,13 +30,16 @@ DataSource:
     mySQLUseSSL: true
     # Verification of server's certificate.
     mySQLCheckServerCertificate: true
+    # Explicit TLS policy used by MySQL, MariaDB and PostgreSQL. VERIFY_IDENTITY
+    # validates both the certificate chain and the database host name.
+    tlsMode: VERIFY_IDENTITY
     # Authorize client to retrieve RSA server public key.
     mySQLAllowPublicKeyRetrieval: true
 
     # Username to connect to the MySQL database
     mySQLUsername: 'authme'
-    # Password to connect to the MySQL database
-    mySQLPassword: '12345'
+    # Set a unique strong password before switching the backend to MySQL/MariaDB.
+    mySQLPassword: ''
     # Database Name, use with converters or as SQLITE database name
     mySQLDatabase: 'authme'
     # Table of the database
@@ -76,10 +83,12 @@ settings:
         minPasswordLength: 5
         # Maximum length of password
         passwordMaxLength: 30
-        # Possible values: SHA256, BCRYPT, BCRYPT2Y, PBKDF2, PBKDF2BASE64,
-        # ARGON2, ARGON2ID, SALTEDSHA512, SALTEDSHA256, SALTED2MD5, SHA512,
+        # Possible values: ARGON2ID, ARGON2, BCRYPT, BCRYPT2Y, PBKDF2, PBKDF2BASE64,
+        # SALTEDSHA512, SALTEDSHA256, SALTED2MD5, SHA512,
         # SHA1, MD5, DOUBLESHA512, PLAINTEXT
-        passwordHash: SHA256
+        passwordHash: ARGON2ID
+        # Legacy primary algorithms are rejected unless this migration-only switch is explicit.
+        allowWeakPasswordHash: false
         # Salt length for SALTED2MD5: MD5(MD5(password)+salt)
         doubleMD5SaltLength: 8
         # Number of rounds to use if passwordHash is set to PBKDF2
@@ -139,17 +148,25 @@ settings:
 
     # Server-wide message language. Optional messages_<locale>.yml overrides are supported.
     messagesLanguage: en
+    # When enabled, messages_<client locale>.yml is preferred for each player.
+    perPlayerLocale: true
 
     restrictions:
         # Restricted usernames and permitted IPs, one entry per line: player;127.0.0.* or player;regex:...
         AllowRestrictedUser: false
         AllowedRestrictedUser: []
+        # Allow unauthenticated players to send public chat messages.
+        allowChat: false
+        # Hide normal chat broadcasts from unauthenticated viewers.
+        hideChat: false
         banUnsafedIP: false
         noTeleport: false
         kickOnWrongPassword: true
         ForceSingleSession: true
         removeSpeed: false
-        displayOtherAccounts: true
+        # Account names sharing an IP are private. Administrators also need
+        # authme.admin.seeotheraccounts before this diagnostic is shown.
+        displayOtherAccounts: false
         otherAccountsThreshold: 0
         otherAccountsCmd: ''
         otherAccountsCmdThreshold: 5
@@ -168,6 +185,9 @@ settings:
     unrestrictions:
         # Names listed here bypass AuthMe authentication (use only for trusted NPC/mod accounts).
         UnrestrictedName: []
+        # Case-insensitive display names of custom inventories that unauthenticated players may use.
+        # Keep this list narrow: matching an inventory grants slot interaction before login.
+        UnrestrictedInventories: []
 
     session:
         # Enable the session feature (login only once for a defined time)
@@ -175,9 +195,23 @@ settings:
         # Session timeout in minutes
         timeout: 60
         # Only the player's IP can resume the session
-        sessionOnlyIp: false
+        # Session resumption always requires the last authenticated IP.
+        # These legacy names remain for config compatibility and cannot weaken
+        # the IP binding.
+        sessionOnlyIp: true
         # Expire a session when the player's IP changes
-        sessionExpireOnIpChange: false
+        sessionExpireOnIpChange: true
+
+    # Temporary unauthenticated-player state. This follows AuthMeReloaded's
+    # settings.limbo layout and survives a restart when persistence is enabled.
+    limbo:
+        persistence:
+            type: INDIVIDUAL_FILES
+            distributionSize: SIXTEEN
+        restoreAllowFlight: RESTORE
+        restoreFlySpeed: RESTORE_NO_ZERO
+        restoreWalkSpeed: RESTORE_NO_ZERO
+        recreateEnderPearls: true
 
 Hooks:
     # BungeeCord/Velocity proxy forwarding verified premium UUIDs
@@ -185,6 +219,8 @@ Hooks:
     sendPlayerTo: ''
     # Must match the AuthMe proxy plugin. Empty rejects perform.login messages.
     proxySharedSecret: ''
+    # Stable source identity authenticated in backend-to-proxy state messages.
+    proxyBackendId: 'backend'
     # Displayname hook
     displayname: false
 
@@ -222,6 +258,11 @@ Email:
     startTls: true
     timeoutMillis: 10000
     recoveryTimeoutSeconds: 600
+    recoveryCooldownSeconds: 60
+    recoveryMaxAttempts: 5
+    recoveryCodeLength: 8
+    passwordChangeTimeoutSeconds: 120
+    enableEmailMasking: false
     # Maximum number of accounts which may use the same address (0 disables the limit).
     maxRegPerEmail: 1
     # Length of generated passwords in EMAIL registration mode.
@@ -246,6 +287,11 @@ AntiBot:
 Protection:
     enableProtection: false
     enableProtectionRegistered: true
+    quickCommands:
+        # Kick unauthenticated players who issue commands too soon after joining.
+        # Set to 0 to disable. The AuthMe player permission enables this guard when
+        # permission checks are active; remove that node to opt out through LuckPerms.
+        denyCommandsBeforeMilliseconds: 1000
     geoIpDatabase:
         enabled: true
         failClosed: false
@@ -263,6 +309,7 @@ Settings:
     # Restrict unauthenticated players
     restrictUnauthenticated:
         allowMovement: false
+        # Allowed horizontal movement radius before login. Set to 0 for unlimited movement.
         allowedMovementRadius: 100
         # Commands usable before authentication
         allowCommands: ['login', 'register', 'l', 'reg', 'authme', 'email', '2fa', 'totp', 'captcha']
@@ -275,3 +322,10 @@ Settings:
     timeouts:
         loginTimeout: 30
         registerTimeout: 30
+
+GroupOptions:
+    # Requires LuckPerms. AuthMe uses transient positive/negative inheritance nodes;
+    # persistent user nodes are never cleared or saved.
+    enablePermissionCheck: false
+    registeredPlayerGroup: ''
+    unregisteredPlayerGroup: ''

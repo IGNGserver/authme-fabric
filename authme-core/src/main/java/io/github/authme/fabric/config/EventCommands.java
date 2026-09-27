@@ -1,6 +1,7 @@
 package io.github.authme.fabric.config;
 
 import io.github.authme.fabric.util.Log;
+import io.github.authme.fabric.util.SecureFileAccess;
 import org.yaml.snakeyaml.LoaderOptions;
 import org.yaml.snakeyaml.Yaml;
 import org.yaml.snakeyaml.constructor.SafeConstructor;
@@ -9,6 +10,7 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.nio.file.Files;
+import java.nio.file.LinkOption;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Collections;
@@ -19,6 +21,12 @@ import java.util.Map;
 
 /** AuthMe-compatible event command configuration. Execution remains platform-specific. */
 public final class EventCommands {
+
+    private static final int MAX_COMMANDS_PER_EVENT = 256;
+    private static final int MAX_COMMAND_LENGTH = 512;
+    private static final int MAX_DELAY_TICKS = 20 * 86_400;
+    private static final java.util.Set<String> EVENTS = java.util.Set.of(
+        "onjoin", "onlogin", "onsessionlogin", "onfirstlogin", "onregister", "onunregister", "onlogout");
 
     private final Path file;
     private final Map<String, List<ConfiguredCommand>> commands = new LinkedHashMap<>();
@@ -31,32 +39,43 @@ public final class EventCommands {
     public synchronized boolean load() {
         commands.clear();
         try {
-            Files.createDirectories(file.getParent());
-            if (!Files.exists(file)) {
+            SecureFileAccess.ensurePrivateDirectory(file.getParent());
+            if (!Files.exists(file, LinkOption.NOFOLLOW_LINKS)) {
                 try (InputStream in = getClass().getResourceAsStream("/assets/authme/commands.yml")) {
                     if (in == null) return false;
-                    try (OutputStream out = Files.newOutputStream(file)) { in.transferTo(out); }
+                    try (OutputStream out = SecureFileAccess.createNewPrivateFile(file)) {
+                        in.transferTo(out);
+                    }
                 }
+            } else {
+                SecureFileAccess.harden(file);
             }
             Object loaded;
-            try (InputStream in = Files.newInputStream(file)) {
-                loaded = new Yaml(new SafeConstructor(new LoaderOptions())).load(in);
+            try (InputStream in = Files.newInputStream(file, LinkOption.NOFOLLOW_LINKS)) {
+                LoaderOptions options = new LoaderOptions();
+                options.setCodePointLimit(256 * 1024);
+                options.setMaxAliasesForCollections(16);
+                options.setNestingDepthLimit(32);
+                loaded = new Yaml(new SafeConstructor(options)).load(in);
             }
             if (!(loaded instanceof Map<?, ?> root)) return false;
             for (Map.Entry<?, ?> event : root.entrySet()) {
                 if (event.getKey() == null || !(event.getValue() instanceof Map<?, ?> entries)) continue;
+                String eventName = String.valueOf(event.getKey()).trim().toLowerCase(Locale.ROOT);
+                if (!EVENTS.contains(eventName)) continue;
                 List<ConfiguredCommand> parsed = new ArrayList<>();
                 for (Map.Entry<?, ?> entry : entries.entrySet()) {
+                    if (parsed.size() >= MAX_COMMANDS_PER_EVENT) break;
                     if (!(entry.getValue() instanceof Map<?, ?> value)) continue;
                     String command = string(value.get("command"), "").trim();
-                    if (command.isEmpty()) continue;
+                    if (command.isEmpty() || command.length() > MAX_COMMAND_LENGTH) continue;
                     Executor executor = Executor.parse(string(value.get("executor"), "CONSOLE"));
-                    int delay = Math.max(0, integer(value.get("delay"), 0));
-                    int atLeast = integer(value.get("ifNumberOfAccountsAtLeast"), -1);
-                    int lessThan = integer(value.get("ifNumberOfAccountsLessThan"), -1);
+                    int delay = Math.min(MAX_DELAY_TICKS, Math.max(0, integer(value.get("delay"), 0)));
+                    int atLeast = boundedAccountLimit(integer(value.get("ifNumberOfAccountsAtLeast"), -1));
+                    int lessThan = boundedAccountLimit(integer(value.get("ifNumberOfAccountsLessThan"), -1));
                     parsed.add(new ConfiguredCommand(command, executor, delay, atLeast, lessThan));
                 }
-                commands.put(String.valueOf(event.getKey()), List.copyOf(parsed));
+                commands.put(eventName, List.copyOf(parsed));
             }
             return true;
         } catch (IOException | RuntimeException e) {
@@ -68,9 +87,12 @@ public final class EventCommands {
 
     public synchronized List<ConfiguredCommand> get(String event) {
         if (event == null) return Collections.emptyList();
-        List<ConfiguredCommand> result = commands.get(event);
-        if (result == null) result = commands.get(event.toLowerCase(Locale.ROOT));
+        List<ConfiguredCommand> result = commands.get(event.trim().toLowerCase(Locale.ROOT));
         return result == null ? Collections.emptyList() : result;
+    }
+
+    private static int boundedAccountLimit(int value) {
+        return value < 0 ? -1 : Math.min(10_000, value);
     }
 
     private static String string(Object value, String fallback) {

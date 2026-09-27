@@ -21,6 +21,11 @@ public class MySQLDataSource extends AbstractSqlDataSource {
         super(settings);
     }
 
+    /** Opens an existing schema without issuing DDL. Use a SELECT-only database principal. */
+    public MySQLDataSource(DbSettings settings, boolean readOnly) throws SQLException {
+        super(settings, !readOnly, null, !readOnly);
+    }
+
     @Override
     protected String driverClassName() {
         return "com.mysql.cj.jdbc.Driver";
@@ -33,16 +38,23 @@ public class MySQLDataSource extends AbstractSqlDataSource {
 
     @Override
     protected String buildJdbcUrl() {
-        String sslMode = !settings.useSsl ? "DISABLED"
-            : (!settings.checkServerCertificate ? "PREFERRED" : "VERIFY_CA");
         StringBuilder u = new StringBuilder("jdbc:mysql://")
             .append(settings.host).append(':').append(settings.port).append('/').append(settings.database);
-        u.append("?useUnicode=true&characterEncoding=utf8&sslMode=").append(sslMode);
+        u.append("?useUnicode=true&characterEncoding=utf8&sslMode=").append(mysqlSslMode(settings.tlsMode));
         if (settings.allowPublicKeyRetrieval) {
             u.append("&allowPublicKeyRetrieval=true");
         }
         u.append("&rewriteBatchedStatements=true&serverTimezone=UTC&socketTimeout=600000&autoReconnect=true");
         return u.toString();
+    }
+
+    private static String mysqlSslMode(DbSettings.TlsMode mode) {
+        return switch (mode) {
+            case DISABLED -> "DISABLED";
+            case REQUIRED -> "REQUIRED";
+            case VERIFY_CA -> "VERIFY_CA";
+            case VERIFY_IDENTITY -> "VERIFY_IDENTITY";
+        };
     }
 
     @Override

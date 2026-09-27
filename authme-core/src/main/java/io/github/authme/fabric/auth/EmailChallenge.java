@@ -11,6 +11,7 @@ public final class EmailChallenge {
     public final long expiresAt;
     public final boolean recovery;
     public volatile boolean verified;
+    public volatile long verifiedAt;
     public int failedAttempts;
 
     public EmailChallenge(String email, String code, long expiresAt, boolean recovery) {

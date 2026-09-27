@@ -2,6 +2,7 @@ package io.github.authme.fabric.events;
 
 import io.github.authme.fabric.AuthMe;
 import net.fabricmc.fabric.api.entity.event.v1.ServerLivingEntityEvents;
+import net.fabricmc.fabric.api.event.lifecycle.v1.ServerEntityEvents;
 import net.fabricmc.fabric.api.event.lifecycle.v1.ServerTickEvents;
 import net.fabricmc.fabric.api.event.player.AttackBlockCallback;
 import net.fabricmc.fabric.api.event.player.AttackEntityCallback;
@@ -37,7 +38,10 @@ public final class AuthMeEvents {
         ServerPlayConnectionEvents.JOIN.register((listener, sender, server) -> {
             ServerPlayer p = listener.getPlayer();
             AuthMe am = AuthMe.get();
-            if (am != null && am.authManager() != null && p != null) am.authManager().onJoin(p);
+            if (am != null && am.authManager() != null && p != null) {
+                am.authManager().handleVipJoin(p);
+                am.authManager().onJoin(p);
+            }
         });
 
         ServerPlayConnectionEvents.DISCONNECT.register((listener, server) -> {
@@ -53,10 +57,17 @@ public final class AuthMeEvents {
             }
         });
 
+        ServerEntityEvents.ENTITY_LOAD.register((entity, world) -> {
+            AuthMe am = AuthMe.get();
+            if (am != null && am.authManager() != null) {
+                am.authManager().trackLimboEnderPearl(entity, world);
+            }
+        });
+
         ServerMessageEvents.ALLOW_CHAT_MESSAGE.register((message, sender, boundChatType) -> {
             AuthMe am = AuthMe.get();
             if (am != null && am.authManager() != null && sender != null && am.authManager().isUnauthenticated(sender)
-                && (!am.config().allowChat() || am.config().hideChat())) {
+                && !am.authManager().allowChatBeforeLogin(sender)) {
                 return false;
             }
             return true;
@@ -66,7 +77,8 @@ public final class AuthMeEvents {
             block(player) ? InteractionResult.FAIL : InteractionResult.PASS);
 
         UseBlockCallback.EVENT.register((player, level, hand, hitResult) ->
-            block(player) ? InteractionResult.FAIL : InteractionResult.PASS);
+            block(player) && !unrestrictedBlock(player, level, hitResult.getBlockPos())
+                ? InteractionResult.FAIL : InteractionResult.PASS);
 
         UseItemCallback.EVENT.register((player, level, hand) ->
             block(player) ? InteractionResult.FAIL : InteractionResult.PASS);
@@ -75,7 +87,8 @@ public final class AuthMeEvents {
             block(player) ? InteractionResult.FAIL : InteractionResult.PASS);
 
         UseEntityCallback.EVENT.register((player, level, hand, entity, hitResult) ->
-            block(player) ? InteractionResult.FAIL : InteractionResult.PASS);
+            block(player) && !unrestrictedEntity(player, entity)
+                ? InteractionResult.FAIL : InteractionResult.PASS);
 
         ServerLivingEntityEvents.ALLOW_DAMAGE.register((entity, source, amount) -> {
             AuthMe am = AuthMe.get();
@@ -88,5 +101,17 @@ public final class AuthMeEvents {
         AuthMe am = AuthMe.get();
         return am != null && am.authManager() != null
             && player instanceof ServerPlayer sp && am.authManager().isUnauthenticated(sp);
+    }
+
+    private static boolean unrestrictedBlock(Player player, Object level, BlockPos pos) {
+        AuthMe am = AuthMe.get();
+        return am != null && am.authManager() != null && player instanceof ServerPlayer sp
+            && am.authManager().allowUnrestrictedBlock(sp, level, pos);
+    }
+
+    private static boolean unrestrictedEntity(Player player, Entity entity) {
+        AuthMe am = AuthMe.get();
+        return am != null && am.authManager() != null && player instanceof ServerPlayer sp
+            && am.authManager().allowUnrestrictedEntity(sp, entity);
     }
 }

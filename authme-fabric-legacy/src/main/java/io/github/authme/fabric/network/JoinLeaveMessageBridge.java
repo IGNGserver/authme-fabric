@@ -1,9 +1,11 @@
 package io.github.authme.fabric.network;
 
 import io.github.authme.fabric.AuthMe;
+import io.github.authme.fabric.util.MinecraftCompat;
 import io.github.authme.fabric.util.MinecraftText;
 import net.minecraft.ChatFormatting;
 import net.minecraft.network.chat.Component;
+import net.minecraft.network.chat.MutableComponent;
 import net.minecraft.server.level.ServerPlayer;
 
 import java.util.Map;
@@ -32,8 +34,9 @@ public final class JoinLeaveMessageBridge {
         if (player == null || auth == null || auth.config() == null
             || auth.config().removeJoinMessage()
             || (!auth.config().delayJoinMessage() && auth.config().customJoinMessage().isBlank())) return;
-        Component vanilla = Component.translatable("multiplayer.player.joined", player.getDisplayName())
-            .withStyle(ChatFormatting.YELLOW);
+        MutableComponent vanilla = MinecraftCompat.joinMessage(player);
+        if (vanilla == null) return;
+        vanilla = vanilla.withStyle(ChatFormatting.YELLOW);
         PENDING_JOIN_MESSAGES.put(player.getUUID(), vanilla);
     }
 
@@ -47,7 +50,7 @@ public final class JoinLeaveMessageBridge {
         Component message = custom.isBlank() ? vanilla
             : MinecraftText.toComponent(renderCustom(custom, player));
         if (player.getServer() != null) {
-            player.getServer().getPlayerList().broadcastSystemMessage(message, false);
+            MinecraftCompat.broadcastSystemMessage(player.getServer().getPlayerList(), message, false);
         }
     }
 

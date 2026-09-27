@@ -1,0 +1,35 @@
+plugins {
+    id 'java-library'
+}
+
+base {
+    archivesName = 'authme-paper-common'
+}
+
+java {
+    sourceCompatibility = JavaVersion.VERSION_21
+    targetCompatibility = JavaVersion.VERSION_21
+    withSourcesJar()
+}
+
+tasks.withType(JavaCompile).configureEach {
+    it.options.release = 21
+    it.options.encoding = 'UTF-8'
+}
+
+repositories {
+    maven {
+        url = 'https://repo.papermc.io/repository/maven-public/'
+        metadataSources {
+            mavenPom()
+            artifact()
+        }
+    }
+    maven { url = 'https://repo.extendedclip.com/content/repositories/placeholderapi/' }
+}
+
+dependencies {
+    implementation project(':authme-platform-core')
+    compileOnly 'io.papermc.paper:paper-api:1.21.11-R0.1-SNAPSHOT'
+    compileOnly 'me.clip:placeholderapi:2.11.6'
+}

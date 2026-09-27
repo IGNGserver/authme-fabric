@@ -33,6 +33,8 @@ import java.util.UUID;
  */
 public class PluginImportConverter implements Converter {
 
+    private static final int MAX_IMPORT_YAML_CODE_POINTS = 8 * 1024 * 1024;
+
     protected final String id;
     protected final String description;
     protected final String defaultPath;
@@ -142,7 +144,11 @@ public class PluginImportConverter implements Converter {
         int imported = 0;
         int skipped = 0;
         try (InputStream input = Files.newInputStream(file)) {
-            Object loaded = new Yaml(new SafeConstructor(new LoaderOptions())).load(input);
+            LoaderOptions options = new LoaderOptions();
+            options.setCodePointLimit(MAX_IMPORT_YAML_CODE_POINTS);
+            options.setMaxAliasesForCollections(32);
+            options.setNestingDepthLimit(32);
+            Object loaded = new Yaml(new SafeConstructor(options)).load(input);
             if (!(loaded instanceof Map<?, ?> root)) throw new IOException("AuthPlus YAML root is not a map");
             for (Map.Entry<?, ?> entry : root.entrySet()) {
                 if (!(entry.getValue() instanceof Map<?, ?> values)) { skipped++; continue; }

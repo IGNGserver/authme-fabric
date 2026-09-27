@@ -1,0 +1,55 @@
+plugins {
+    id 'java-library'
+}
+
+base {
+    archivesName = 'authme-proxy-core'
+}
+
+java {
+    sourceCompatibility = JavaVersion.VERSION_17
+    targetCompatibility = JavaVersion.VERSION_17
+    withSourcesJar()
+}
+
+tasks.withType(JavaCompile).configureEach {
+    it.options.release = 17
+    it.options.encoding = 'UTF-8'
+}
+
+dependencies {
+    implementation project(':authme-core')
+    implementation "com.mysql:mysql-connector-j:${rootProject.mysql_version}"
+    implementation "org.mariadb.jdbc:mariadb-java-client:${rootProject.mariadb_version}"
+    implementation "org.postgresql:postgresql:${rootProject.postgresql_version}"
+    implementation "org.xerial:sqlite-jdbc:${rootProject.sqlite_version}"
+}
+
+tasks.register('proxyCoreSelfTest', JavaExec) {
+    dependsOn testClasses
+    classpath = sourceSets.test.runtimeClasspath
+    mainClass = 'io.github.authme.proxy.core.ProxyCoreSelfTest'
+}
+
+tasks.named('check') {
+    dependsOn tasks.named('proxyCoreSelfTest')
+}
+
+tasks.withType(Test).configureEach {
+    failOnNoDiscoveredTests = false
+}
+
+// Proxy plugins must be installable without a Fabric loader.  Bundle the pure-Java
+// core and its runtime libraries into the proxy-core artifact; platform API jars are
+// kept compileOnly in the Velocity/Bungee modules.
+jar {
+    dependsOn configurations.runtimeClasspath
+    from {
+        configurations.runtimeClasspath.collect { it.isDirectory() ? it : zipTree(it) }
+    }
+    duplicatesStrategy = DuplicatesStrategy.EXCLUDE
+    exclude 'META-INF/*.SF', 'META-INF/*.DSA', 'META-INF/*.RSA', 'META-INF/*.MF'
+    from(rootProject.file('LICENSE')) {
+        rename { "${it}_authme-proxy-core" }
+    }
+}

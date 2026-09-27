@@ -15,8 +15,11 @@ import io.github.authme.fabric.security.PasswordSecurity;
 import io.github.authme.fabric.security.RandomStringUtils;
 import io.github.authme.fabric.security.HashedPassword;
 import io.github.authme.fabric.totp.TotpProvider;
+import io.github.authme.fabric.auth.SessionSecurityPolicy;
+import io.github.authme.fabric.auth.EmailAddressPolicy;
 import io.github.authme.fabric.util.Log;
 import io.github.authme.fabric.util.MinecraftText;
+import io.github.authme.fabric.util.MinecraftCompat;
 import io.github.authme.fabric.util.BanListBridge;
 import io.github.authme.fabric.util.ProxyProtocol;
 import io.github.authme.fabric.util.PurgeFileCleaner;
@@ -24,11 +27,15 @@ import io.github.authme.fabric.util.PermissionBridge;
 import io.github.authme.fabric.network.JoinLeaveMessageBridge;
 import io.github.authme.fabric.mail.EmailSender;
 import net.minecraft.server.MinecraftServer;
+import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
-import net.minecraft.network.protocol.game.ClientboundPlayerInfoRemovePacket;
-import net.minecraft.network.protocol.game.ClientboundPlayerInfoUpdatePacket;
+import net.minecraft.core.BlockPos;
+import net.minecraft.world.MenuProvider;
+import net.minecraft.world.entity.Entity;
+import net.minecraft.world.entity.projectile.ThrownEnderpearl;
 import net.minecraft.world.phys.Vec3;
 import net.minecraft.world.level.GameType;
+import net.minecraft.world.level.Level;
 import net.minecraft.world.effect.MobEffectInstance;
 import net.minecraft.world.effect.MobEffects;
 import net.fabricmc.loader.api.FabricLoader;
@@ -36,12 +43,12 @@ import net.fabricmc.loader.api.FabricLoader;
 import java.util.Locale;
 import java.util.Map;
 import java.util.List;
-import java.util.EnumSet;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.UUID;
 import java.security.SecureRandom;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.function.Consumer;
 
 /**
@@ -53,41 +60,80 @@ import java.util.function.Consumer;
  */
 public final class AuthManager {
 
+    private static final int MAX_LIMBO_ENDER_PEARLS = 64;
+    private static final int MAX_UNSAFE_IP_BLOCKS = 8192;
+    private static final int MAX_EMAIL_RECOVERY_ENTRIES = 8192;
+    private static final int MAX_SCHEDULED_COMMANDS = 8192;
+
     private final AuthMe auth;
     private final java.util.Map<String, PlayerSession> sessions = new java.util.concurrent.ConcurrentHashMap<>();
     private final Map<String, EmailChallenge> emailChallenges = new java.util.concurrent.ConcurrentHashMap<>();
-    private final Map<String, LoginFailure> loginFailures = new java.util.concurrent.ConcurrentHashMap<>();
+    private final Map<String, Long> emailRecoveryLastSent = new java.util.concurrent.ConcurrentHashMap<>();
     private final java.util.Set<String> unsafeIpBlocks = java.util.concurrent.ConcurrentHashMap.newKeySet();
     private final SecureRandom secureRandom = new SecureRandom();
     private final SpawnStore spawnStore;
     private final EventCommands eventCommands;
+    private final UnrestrictedInventoryRegistry unrestrictedInventoryRegistry = new UnrestrictedInventoryRegistry();
+    private LimboStateStore limboStore;
     private final java.util.List<ScheduledCommand> scheduledCommands = new java.util.concurrent.CopyOnWriteArrayList<>();
+    private final Map<UUID, List<LimboEnderPearl>> limboEnderPearls = new java.util.concurrent.ConcurrentHashMap<>();
     private long tickCounter;
     private boolean autoPurgeStarted;
     private long lastAutoBackupMillis;
 
-    private static final class LoginFailure {
-        long windowStarted;
-        int attempts;
-        long bannedUntil;
+    private record LimboEnderPearl(ThrownEnderpearl entity, ServerLevel level,
+                                   double x, double y, double z, Vec3 velocity,
+                                   float yaw, float pitch) {
     }
 
     private record RegistrationCheck(DataSource.CheckResult availability, DataSource.CountResult byIp,
                                      DataSource.CountResult byEmail) { }
+    private record JoinLookup(DataSource.LookupResult auth,
+                              DataSource.FailureStateResult accountFailure,
+                              DataSource.FailureStateResult sourceFailure) { }
     private record PurgeResult(DataSource.OperationResult operation, List<PlayerAuth> candidates, int files) { }
 
     public AuthManager(AuthMe auth) {
         this.auth = auth;
         this.spawnStore = new SpawnStore(auth.config().configDir());
         this.eventCommands = new EventCommands(auth.config().configDir());
+        this.limboStore = new LimboStateStore(auth.config().configDir(), auth.config().limboPersistence(),
+            auth.config().limboDistributionSize());
     }
 
     /** Refreshes file-backed command configuration without discarding online sessions. */
     public void reloadConfiguration() {
         eventCommands.load();
+        limboStore = new LimboStateStore(auth.config().configDir(), auth.config().limboPersistence(),
+            auth.config().limboDistributionSize());
         scheduledCommands.clear();
         autoPurgeStarted = false;
         lastAutoBackupMillis = 0L;
+        unrestrictedInventoryRegistry.clearAll();
+        syncOnlineRestrictionState();
+    }
+
+    /** Applies a newly reloaded restriction policy to sessions that are already online. */
+    private void syncOnlineRestrictionState() {
+        MinecraftServer server = auth.server();
+        if (server == null) return;
+        boolean showTab = !cfg().restrictUnauthenticated() || !cfg().hideTablist();
+        for (ServerPlayer player : server.getPlayerList().getPlayers()) {
+            PlayerSession session = sessions.get(realName(player).toLowerCase(Locale.ROOT));
+            if (session == null || session.authenticated) {
+                if (showTab) showTabEntry(player);
+                continue;
+            }
+            if (isUnauthenticated(player) && cfg().restrictUnauthenticated()) {
+                if (!session.limboCaptured) enterLimbo(player, session);
+                setBlindEffect(player, true);
+                if (cfg().hideTablist()) hideTabEntry(player);
+            } else {
+                if (session.limboCaptured) restoreLimbo(player, session);
+                setBlindEffect(player, false);
+                if (showTab) showTabEntry(player);
+            }
+        }
     }
 
     private AuthMeConfig cfg() { return auth.config(); }
@@ -96,26 +142,92 @@ public final class AuthManager {
 
     // ===================================================================== join / quit
 
+    /**
+     * Makes room for an AuthMe VIP after the vanilla capacity check allowed the join. The
+     * capacity mixin only bypasses the full-server branch; all vanilla ban/whitelist checks have
+     * already completed before this method runs. If every current player is VIP, the joining
+     * player is rejected again so VIPs cannot grow the server without a replacement slot.
+     */
+    public void handleVipJoin(ServerPlayer player) {
+        MinecraftServer server = auth.server();
+        if (player == null || server == null || !hasVipPermission(player)) return;
+        var playerList = server.getPlayerList();
+        if (playerList.getPlayers().size() <= playerList.getMaxPlayers()) return;
+
+        for (ServerPlayer online : playerList.getPlayers()) {
+            if (online != player && !hasVipPermission(online)) {
+                kick(online, auth.message("kick_for_vip"));
+                Log.info("VIP player " + realName(player) + " joined a full server; removed "
+                    + realName(online) + " to make room.");
+                return;
+            }
+        }
+
+        Log.info("VIP player " + realName(player) + " tried to join, but the server had no non-VIP slot.");
+        kick(player, auth.message("kick_full_server"));
+    }
+
     public void onJoin(ServerPlayer player) {
-        JoinLeaveMessageBridge.prepareJoin(player);
-        String joinIp = ip(player);
-        if (isTempBanned(joinIp)) {
-            kick(player, auth.message("account_tempban"));
+        if (!auth.healthy()) {
+            kick(player, auth.message("database.error"));
             return;
         }
+        JoinLeaveMessageBridge.prepareJoin(player);
+        unrestrictedInventoryRegistry.clear(player.getUUID());
+        String joinIp = ip(player);
         AntiBotManager ab = auth.antiBot();
-        if (ab != null && ab.shouldBlockNewJoins()) {
+        boolean antibotBlocking = ab != null && ab.shouldBlockNewJoins();
+        if (ab != null && ab.consumeDeactivationNotice()) {
+            notifyAntiBotAdmins("antibot.auto_disabled", "duration", cfg().antiBotDurationMinutes());
+        }
+        if (antibotBlocking && !hasAuthMePermission(player, "authme.bypassantibot")) {
             kick(player, auth.message("account_tempban"));
             return;
         }
 
         String name = realName(player);
+        String lower = name.toLowerCase(Locale.ROOT);
+        PlayerSession session = new PlayerSession(player.getUUID(), lower);
+        session.lastIp = joinIp;
+        session.joinTime = System.currentTimeMillis();
+        session.frozenX = player.getX();
+        session.frozenY = player.getY();
+        session.frozenZ = player.getZ();
+        session.frozenWorld = worldKey(player);
+        PlayerSession existing = sessions.get(lower);
+        if (existing != null && existing.active && !existing.uuid.equals(player.getUUID())) {
+            kick(player, auth.message("login.singleSession"));
+            return;
+        }
+        sessions.put(lower, session);
+        if (cfg().restrictUnauthenticated()) {
+            enterLimbo(player, session);
+            player.setDeltaMovement(Vec3.ZERO);
+            setBlindEffect(player, true);
+        }
+
+        // AuthMe's name unrestriction is intended for NPCs and other trusted server-side
+        // identities. It bypasses AuthMe's authentication and player restriction checks, but
+        // still remains behind the connection-level health, tempban, and AntiBot gates above.
+        if (isUnrestrictedName(lower)) {
+            session.accountResolved = true;
+            session.registered = true;
+            session.authenticated = true;
+            session.unrestrictedName = true;
+            restoreLimbo(player, session);
+            applyConfiguredGameMode(player, true);
+            setBlindEffect(player, false);
+            runEventCommands("onJoin", player);
+            runEventCommands("onLogin", player);
+            JoinLeaveMessageBridge.onAuthenticated(player);
+            return;
+        }
+
         applyConfiguredGameMode(player, false);
         if (cfg().protectionEnabled() && cfg().protectionRegistered() && !countryAllowed(player, joinIp)) {
             kick(player, auth.message("country_banned"));
             return;
         }
-        String lower = name.toLowerCase(Locale.ROOT);
         if (cfg().allowRestrictedUsers()) {
             String restrictedKey = restrictedKey(name, joinIp);
             if (cfg().banUnsafeIp() && unsafeIpBlocks.contains(restrictedKey)) {
@@ -125,7 +237,7 @@ public final class AuthManager {
             if (!restrictedIpAllowed(name, joinIp)) {
                 // Scope the temporary block to the restricted username as well as the address;
                 // one failed attempt must not deny every player behind a shared/NAT address.
-                if (cfg().banUnsafeIp()) unsafeIpBlocks.add(restrictedKey);
+                if (cfg().banUnsafeIp()) rememberUnsafeIpBlock(restrictedKey);
                 kick(player, auth.message("restricted_user"));
                 return;
             }
@@ -138,50 +250,41 @@ public final class AuthManager {
             kick(player, auth.message("login.sameIp"));
             return;
         }
-        PlayerSession session = new PlayerSession(player.getUUID(), lower);
-        session.lastIp = joinIp;
-        session.joinTime = System.currentTimeMillis();
-        session.frozenX = player.getX();
-        session.frozenY = player.getY();
-        session.frozenZ = player.getZ();
-        session.frozenWorld = worldKey(player);
-        sessions.put(lower, session);
-        player.setInvulnerable(true);
-        player.setDeltaMovement(Vec3.ZERO);
-        setBlindEffect(player, true);
+        if (cfg().restrictUnauthenticated() && cfg().hideTablist()) hideTabEntry(player);
 
-        if (cfg().unrestrictedNames().stream().map(s -> s.toLowerCase(Locale.ROOT)).anyMatch(lower::equals)) {
-            session.accountResolved = true;
-            session.registered = true;
-            session.authenticated = true;
-            applyConfiguredGameMode(player, true);
-            player.setInvulnerable(false);
-            setBlindEffect(player, false);
-            runEventCommands("onJoin", player);
-            runEventCommands("onLogin", player);
-            JoinLeaveMessageBridge.onAuthenticated(player);
-            return;
+        if (ab != null && ab.notifyJoin(session.lastIp)) {
+            runAntiBotCommands(player);
+            notifyAntiBotAdmins("antibot.auto_enabled");
         }
-        if (cfg().hideTablist()) hideTabEntry(player);
-
-        if (ab != null && ab.notifyJoin(session.lastIp)) runAntiBotCommands(player);
 
         CompletableFuture
-            .supplyAsync(() -> ds().lookupAuth(lower))
+            .supplyAsync(() -> new JoinLookup(ds().lookupAuth(lower),
+                ds().readFailureState(accountFailureStateKey(lower, joinIp),
+                    System.currentTimeMillis(), failureWindowMillis()),
+                ds().readFailureState(sourceFailureStateKey(joinIp),
+                    System.currentTimeMillis(), failureWindowMillis())))
             .thenAccept(result -> executeMain(() -> {
-                if (!result.successful()) {
+                if (!result.auth().successful() || !result.accountFailure().successful()
+                    || !result.sourceFailure().successful()) {
                     failDatabase(player, session);
                     return;
                 }
-                applyJoin(player, lower, session, result.auth());
+                if (cfg().tempbanEnabled() && (result.accountFailure().bannedUntil() > System.currentTimeMillis()
+                    || result.sourceFailure().bannedUntil() > System.currentTimeMillis())) {
+                    kick(player, auth.message("account_tempban"));
+                    return;
+                }
+                applyJoin(player, lower, session, result.auth().auth(), result.accountFailure().attempts());
             }))
             .exceptionally(error -> { executeMain(() -> failDatabase(player, session)); return null; });
     }
 
-    private void applyJoin(ServerPlayer player, String lower, PlayerSession session, PlayerAuth authRow) {
-        if (offline(player)) return;
+    private void applyJoin(ServerPlayer player, String lower, PlayerSession session, PlayerAuth authRow,
+                           int sharedFailureAttempts) {
+        if (!current(player, session)) return;
         session.accountResolved = true;
         session.registered = (authRow != null);
+        applyPermissionGroup(player, session);
         if (authRow != null && cfg().preventOtherCase()) {
             String storedRealName = authRow.getRealName();
             if (storedRealName == null || storedRealName.isBlank() || "Player".equals(storedRealName)) {
@@ -205,7 +308,8 @@ public final class AuthManager {
                 return;
             }
             if (!cfg().registrationForce()) {
-                player.setInvulnerable(false);
+                restoreLimbo(player, session);
+                setBlindEffect(player, false);
                 if (cfg().captchaEnabled() && cfg().captchaForRegistration()) requireCaptcha(session);
                 schedulePrompt(player, session, false);
                 return;
@@ -216,22 +320,24 @@ public final class AuthManager {
         }
         session.lastLogin = authRow.getLastLogin() == null ? 0L : authRow.getLastLogin();
 
-        if (cfg().captchaEnabled() && failureAttempts(session.lastIp) >= cfg().maxLoginTriesForCaptcha()) {
+        if (cfg().captchaEnabled() && sharedFailureAttempts >= cfg().maxLoginTriesForCaptcha()) {
             requireCaptcha(session);
         }
 
         boolean autoLogin = false;
-        if (cfg().enablePremium() && auth.server() != null && auth.server().usesAuthentication()
+        boolean hasTotp = authRow.getTotpKey() != null && !authRow.getTotpKey().isBlank();
+        if (!hasTotp && cfg().enablePremium() && auth.server() != null && auth.server().usesAuthentication()
             && authRow.getPremiumUuid() != null
             && authRow.getPremiumUuid().equals(player.getUUID())) {
             autoLogin = true;
-        } else if (cfg().sessionEnabled() && authRow.hasSession()) {
+        } else if (!hasTotp && cfg().sessionEnabled() && authRow.hasSession()) {
             long now = System.currentTimeMillis();
             long timeout = cfg().sessionTimeoutMinutes() * 60_000L;
-            boolean within = session.lastLogin > 0 && (now - session.lastLogin) <= timeout;
-            boolean ipOk = !(cfg().sessionOnlyIp() || cfg().sessionExpireOnIpChange())
-                || (authRow.getLastIp() != null && authRow.getLastIp().equalsIgnoreCase(session.lastIp));
-            if (within && ipOk) autoLogin = true;
+            // A persisted session is a password bypass. It must always be
+            // bound to the IP that created it; legacy switches cannot turn
+            // this check off.
+            if (SessionSecurityPolicy.canResume(authRow.getLastIp(), session.lastIp,
+                session.lastLogin, now, timeout)) autoLogin = true;
         }
 
         if (autoLogin) {
@@ -242,27 +348,49 @@ public final class AuthManager {
         }
     }
 
+    /** Records a thrown ender pearl while the owner is inside the unauthenticated limbo. */
+    public void trackLimboEnderPearl(Entity entity, ServerLevel level) {
+        if (!(entity instanceof ThrownEnderpearl pearl) || level == null) return;
+        if (!(pearl.getOwner() instanceof ServerPlayer player) || !isUnauthenticated(player)) return;
+        String lower = realName(player).toLowerCase(Locale.ROOT);
+        PlayerSession session = sessions.get(lower);
+        if (session == null || !session.active || !session.limboCaptured) return;
+        List<LimboEnderPearl> tracked = limboEnderPearls.computeIfAbsent(session.uuid,
+            ignored -> new CopyOnWriteArrayList<>());
+        if (tracked.size() >= MAX_LIMBO_ENDER_PEARLS) return;
+        for (LimboEnderPearl existing : tracked) {
+            if (existing.entity() == pearl) return;
+        }
+        tracked.add(new LimboEnderPearl(pearl, level, pearl.getX(), pearl.getY(), pearl.getZ(),
+            pearl.getDeltaMovement(), pearl.getYRot(), pearl.getXRot()));
+    }
+
     public void onDisconnect(ServerPlayer player) {
         JoinLeaveMessageBridge.clear(player);
+        if (player != null) unrestrictedInventoryRegistry.clear(player.getUUID());
         String lower = realName(player).toLowerCase(Locale.ROOT);
-        PlayerSession session = sessions.remove(lower);
+        PlayerSession session = sessions.get(lower);
+        if (session != null) sessions.remove(lower, session);
         emailChallenges.remove("verify:" + lower);
         emailChallenges.remove("recover:" + lower);
         if (session == null) return;
+        long expectedLastLogin = session.lastLogin;
         session.active = false;
+        session.authenticationBusy = false;
         session.loginGeneration++;
-        if (session.authenticated) {
-            double x = player.getX(), y = player.getY(), z = player.getZ();
+        restoreLimbo(player, session);
+        if (!session.authenticated || session.unrestrictedName) return;
+        double x = player.getX(), y = player.getY(), z = player.getZ();
             float yaw = player.getYRot(), pitch = player.getXRot();
             String world = worldKey(player);
             runEventCommands("onLogout", player);
             auth.emitProxyMessage(ProxyProtocol.LOGOUT, lower);
             CompletableFuture.runAsync(() -> {
-                boolean ok = ds().persistDisconnect(lower, System.currentTimeMillis(), x, y, z, yaw, pitch, world,
+                boolean ok = ds().persistDisconnectIfLastLogin(lower, expectedLastLogin,
+                    System.currentTimeMillis(), x, y, z, yaw, pitch, world,
                     cfg().saveQuitLocation(), cfg().sessionEnabled());
                 if (!ok) Log.error("Failed to persist disconnect state for " + lower);
-            }).whenComplete((r, e) -> { if (e != null) Log.error("Failed to flush session for " + lower, e); });
-        }
+        }).whenComplete((r, e) -> { if (e != null) Log.error("Failed to flush session for " + lower, e); });
     }
 
     // ===================================================================== register / login
@@ -274,6 +402,10 @@ public final class AuthManager {
             MinecraftText.send(player, auth.message("login.already"));
             return;
         }
+        if (password == null || password.length() > cfg().maxPasswordLength()) {
+            onWrongPassword(player, session, lower);
+            return;
+        }
         if (session.captchaPending) {
             MinecraftText.send(player, auth.message("captcha.required", "code", session.captchaCode));
             return;
@@ -282,15 +414,17 @@ public final class AuthManager {
             MinecraftText.send(player, auth.message("login.sameIp"));
             return;
         }
+        if (!beginAuthentication(player, session)) return;
         CompletableFuture
             .supplyAsync(() -> ds().lookupAuth(lower))
             .thenAccept(a -> executeMain(() -> {
-                if (offline(player)) return;
+                if (!current(player, session)) return;
                 if (!a.successful()) {
                     failDatabase(player, session);
                     return;
                 }
                 if (a.auth() == null) {
+                    clearAuthentication(session);
                     MinecraftText.send(player, auth.message("login.notRegistered"));
                     return;
                 }
@@ -303,40 +437,80 @@ public final class AuthManager {
                     return;
                 }
                 if (result.isLegacy()) {
-                    // re-hash with the primary algorithm
                     HashedPassword rehashed = sec().computeHash(password, lower);
-                    CompletableFuture.supplyAsync(() -> ds().updatePassword(lower, rehashed))
-                        .thenAccept(updated -> { if (!updated) Log.error("Could not persist legacy password migration for " + lower); });
-                    Log.info("Rehashed legacy password for " + lower);
+                    CompletableFuture.supplyAsync(() -> ds().updatePasswordIfMatches(lower, stored, rehashed))
+                        .thenAccept(updated -> executeMain(() -> {
+                            if (!current(player, session)) return;
+                            if (!updated) {
+                                clearAuthentication(session);
+                                Log.warn("Rejected legacy login for " + lower
+                                    + " because the password row changed during migration");
+                                MinecraftText.send(player, auth.message("database.error"));
+                                return;
+                            }
+                            Log.info("Rehashed legacy password for " + lower);
+                            finishPasswordLogin(player, session, row);
+                        }))
+                        .exceptionally(error -> {
+                            executeMain(() -> failDatabase(player, session));
+                            return null;
+                        });
+                    return;
                 }
-                session.loginAttempts = 0;
-                session.totpKey = row.getTotpKey();
-                if (row.getTotpKey() != null && !row.getTotpKey().isEmpty()
-                    && TotpProvider.isPlausibleSecret(row.getTotpKey())) {
-                    session.pendingTotp = true;
-                    session.captchaPending = false;
-                    MinecraftText.send(player, auth.message("totp.required"));
-                } else {
-                    completeLogin(player, session, row, null);
-                }
+                finishPasswordLogin(player, session, row);
             }))
             .exceptionally(error -> { executeMain(() -> failDatabase(player, session)); return null; });
     }
 
+    /** Continues only after a legacy password compare-and-set has committed successfully. */
+    private void finishPasswordLogin(ServerPlayer player, PlayerSession session, PlayerAuth row) {
+        if (!current(player, session)) return;
+        session.loginAttempts = 0;
+        session.totpKey = row.getTotpKey();
+        if (row.getTotpKey() != null && !row.getTotpKey().isEmpty()) {
+            clearAuthentication(session);
+            session.pendingTotp = true;
+            session.proxyTotpPending = false;
+            session.captchaPending = false;
+            MinecraftText.send(player, auth.message("totp.required"));
+        } else {
+            completeLogin(player, session, row, null);
+        }
+    }
+
     /** Completes a login requested by a HMAC-authenticated AuthMe proxy. */
-    public void forceLoginFromProxy(ServerPlayer player, UUID verifiedPremiumUuid) {
-        if (!cfg().bungeecordHook() || player == null) return;
+    public void forceLoginFromProxy(ServerPlayer player, String requestedName, UUID verifiedPremiumUuid) {
+        if (!cfg().bungeecordHook() || player == null || requestedName == null
+            || !realName(player).equalsIgnoreCase(requestedName)) {
+            Log.warn("Rejected proxy login because the signed player name did not match the carrier connection.");
+            return;
+        }
         String lower = realName(player).toLowerCase(Locale.ROOT);
         PlayerSession session = sessions.get(lower);
-        if (session == null || session.authenticated) return;
+        if (session == null || session.authenticated || session.pendingTotp) return;
+        if (!beginAuthentication(player, session)) return;
         CompletableFuture.supplyAsync(() -> ds().lookupAuth(lower))
             .thenAccept(result -> executeMain(() -> {
-                if (offline(player) || session != sessions.get(lower)) return;
+                if (!current(player, session)) return;
                 if (!result.successful()) { failDatabase(player, session); return; }
                 PlayerAuth row = result.auth();
-                if (row == null) { Log.warn("Rejected proxy login for unregistered account " + lower); return; }
+                if (row == null) {
+                    clearAuthentication(session);
+                    Log.warn("Rejected proxy login for unregistered account " + lower);
+                    return;
+                }
                 if (verifiedPremiumUuid != null && !verifiedPremiumUuid.equals(row.getPremiumUuid())) {
+                    clearAuthentication(session);
                     Log.warn("Rejected proxy premium login for " + lower + ": UUID does not match the stored account");
+                    return;
+                }
+                session.totpKey = row.getTotpKey();
+                if (row.getTotpKey() != null && !row.getTotpKey().isBlank()) {
+                    clearAuthentication(session);
+                    session.pendingTotp = true;
+                    session.proxyTotpPending = true;
+                    session.captchaPending = false;
+                    MinecraftText.send(player, auth.message("totp.required"));
                     return;
                 }
                 completeLogin(player, session, row, () -> auth.emitProxyMessage(ProxyProtocol.PERFORM_LOGIN_ACK, lower));
@@ -345,18 +519,28 @@ public final class AuthManager {
     }
 
     private void onWrongPassword(ServerPlayer player, PlayerSession session, String lower) {
+        clearAuthentication(session);
         MinecraftText.send(player, auth.message("login.wrong"));
-        session.loginAttempts = recordLoginFailure(session.lastIp);
-        if (cfg().kickOnWrongPassword()) {
-            kick(player, auth.message("login.wrong"));
-        } else if (cfg().tempbanEnabled() && session.loginAttempts >= cfg().tempbanMaxLoginTries()) {
+        CompletableFuture.supplyAsync(() -> recordLoginFailure(lower, session.lastIp)).thenAccept(attempts ->
+            executeMain(() -> applyLoginFailure(player, session, lower, attempts)));
+    }
+
+    private void applyLoginFailure(ServerPlayer player, PlayerSession session, String lower, int attempts) {
+        if (!current(player, session)) return;
+        session.loginAttempts = attempts;
+        LoginFailurePolicy.Action action = LoginFailurePolicy.decide(cfg().tempbanEnabled(), attempts,
+            cfg().tempbanMaxLoginTries(), cfg().captchaEnabled(), cfg().maxLoginTriesForCaptcha(),
+            cfg().kickOnWrongPassword());
+        if (action == LoginFailurePolicy.Action.TEMPBAN) {
             applyTempban(player, session.lastIp);
             kick(player, auth.message("account_tempban"));
             Log.info("Temporarily blocked repeated login failures for " + lower + ".");
-        } else if (cfg().captchaEnabled() && session.loginAttempts >= cfg().maxLoginTriesForCaptcha()) {
+        } else if (action == LoginFailurePolicy.Action.CAPTCHA) {
             session.captchaPending = true;
             session.captchaCode = RandomStringUtils.generateNum(Math.max(3, cfg().captchaLength()));
             MinecraftText.send(player, auth.message("captcha.required", "code", session.captchaCode));
+        } else if (action == LoginFailurePolicy.Action.KICK_WRONG_PASSWORD) {
+            kick(player, auth.message("login.wrong"));
         }
     }
 
@@ -421,28 +605,33 @@ public final class AuthManager {
             MinecraftText.send(player, auth.message("reg.unsafePassword"));
             return;
         }
+        if (!beginAuthentication(player, session)) return;
         final String registrationEmail = email;
         CompletableFuture
             .supplyAsync(() -> new RegistrationCheck(ds().checkAuthAvailable(lower),
                 ds().countRegisteredByIp(session.lastIp),
                 registrationEmail == null ? new DataSource.CountResult(0, true) : ds().countRegisteredByEmail(registrationEmail)))
             .thenAccept(check -> executeMain(() -> {
-                if (offline(player)) return;
+                if (!current(player, session)) return;
                 if (!check.availability().successful() || !check.byIp().successful() || !check.byEmail().successful()) {
-                    MinecraftText.send(player, auth.message("database.error"));
+                    failDatabase(player, session);
                     return;
                 }
                 if (check.availability().available()) {
+                    clearAuthentication(session);
                     MinecraftText.send(player, auth.message("reg.already"));
                     return;
                 }
                 if (cfg().maxRegistrationsPerIp() > 0
+                    && !hasAuthMePermission(player, "authme.allowmultipleaccounts")
                     && check.byIp().count() >= cfg().maxRegistrationsPerIp()) {
+                    clearAuthentication(session);
                     MinecraftText.send(player, auth.message("reg.maxIp"));
                     return;
                 }
                 if (registrationEmail != null && cfg().maxRegistrationsPerEmail() > 0
                     && check.byEmail().count() >= cfg().maxRegistrationsPerEmail()) {
+                    clearAuthentication(session);
                     MinecraftText.send(player, auth.message("email.max"));
                     return;
                 }
@@ -463,14 +652,20 @@ public final class AuthManager {
                 CompletableFuture.supplyAsync(() -> ds().saveAuth(pa))
                     .thenAccept(saved -> executeMain(() -> {
                         if (!saved) {
-                            MinecraftText.send(player, auth.message("database.error"));
+                            failDatabase(player, session);
                             return;
                         }
                         finishRegister(player, lower, session, pa);
                     }))
-                    .exceptionally(error -> { executeMain(() -> MinecraftText.send(player, auth.message("database.error"))); return null; });
+                    .exceptionally(error -> {
+                        executeMain(() -> { clearAuthentication(session); MinecraftText.send(player, auth.message("database.error")); });
+                        return null;
+                    });
             }))
-            .exceptionally(error -> { executeMain(() -> MinecraftText.send(player, auth.message("database.error"))); return null; });
+            .exceptionally(error -> {
+                executeMain(() -> { clearAuthentication(session); MinecraftText.send(player, auth.message("database.error")); });
+                return null;
+            });
     }
 
     private void registerByEmail(ServerPlayer player, String email, String second) {
@@ -510,27 +705,32 @@ public final class AuthManager {
                 return;
             }
         }
+        if (!beginAuthentication(player, session)) return;
         final String registrationEmail = email;
         CompletableFuture
             .supplyAsync(() -> new RegistrationCheck(ds().checkAuthAvailable(lower),
                 ds().countRegisteredByIp(session.lastIp), ds().countRegisteredByEmail(registrationEmail)))
             .thenAccept(check -> executeMain(() -> {
-                if (offline(player)) return;
+                if (!current(player, session)) return;
                 if (!check.availability().successful() || !check.byIp().successful() || !check.byEmail().successful()) {
-                    MinecraftText.send(player, auth.message("database.error"));
+                    failDatabase(player, session);
                     return;
                 }
                 if (check.availability().available()) {
+                    clearAuthentication(session);
                     MinecraftText.send(player, auth.message("reg.already"));
                     return;
                 }
                 if (cfg().maxRegistrationsPerIp() > 0
+                    && !hasAuthMePermission(player, "authme.allowmultipleaccounts")
                     && check.byIp().count() >= cfg().maxRegistrationsPerIp()) {
+                    clearAuthentication(session);
                     MinecraftText.send(player, auth.message("reg.maxIp"));
                     return;
                 }
                 if (cfg().maxRegistrationsPerEmail() > 0
                     && check.byEmail().count() >= cfg().maxRegistrationsPerEmail()) {
+                    clearAuthentication(session);
                     MinecraftText.send(player, auth.message("email.max"));
                     return;
                 }
@@ -554,34 +754,43 @@ public final class AuthManager {
                 CompletableFuture.supplyAsync(() -> ds().saveAuth(pa))
                     .thenAccept(saved -> executeMain(() -> {
                         if (!saved) {
-                            MinecraftText.send(player, auth.message("database.error"));
+                            failDatabase(player, session);
                             return;
                         }
                         session.registered = true;
+                        clearAuthentication(session);
                         CompletableFuture.supplyAsync(() -> EmailSender.send(cfg(), registrationEmail,
                                 "Your new AuthMe password",
                                 "Your AuthMe account for " + realName(player) + " was created.\n"
                                     + "Your generated password is: " + generatedPassword))
                             .thenAccept(sent -> executeMain(() -> {
-                                if (offline(player)) return;
+                                if (!current(player, session)) return;
                                 MinecraftText.send(player, auth.message(sent ? "reg.emailSuccess" : "reg.emailSendFailure",
                                     "email", registrationEmail));
                                 if (sent) runEventCommands("onRegister", player);
                             }));
                     }))
-                    .exceptionally(error -> { executeMain(() -> MinecraftText.send(player, auth.message("database.error"))); return null; });
+                    .exceptionally(error -> {
+                        executeMain(() -> { clearAuthentication(session); MinecraftText.send(player, auth.message("database.error")); });
+                        return null;
+                    });
             }))
-            .exceptionally(error -> { executeMain(() -> MinecraftText.send(player, auth.message("database.error"))); return null; });
+            .exceptionally(error -> {
+                executeMain(() -> { clearAuthentication(session); MinecraftText.send(player, auth.message("database.error")); });
+                return null;
+            });
     }
 
     private void finishRegister(ServerPlayer player, String lower, PlayerSession session, PlayerAuth pa) {
         executeMain(() -> {
-            if (offline(player)) return;
+            if (!current(player, session)) return;
             MinecraftText.send(player, auth.message("reg.success", "?", ""));
             runEventCommands("onRegister", player);
             if (cfg().forceKickAfterRegister()) {
+                session.registered = true;
+                clearAuthentication(session);
                 Runnable kickAction = () -> {
-                    if (!offline(player)) kick(player, auth.message("reg.success"));
+                    if (current(player, session)) kick(player, auth.message("reg.success"));
                 };
                 if (cfg().registrationKickDelaySeconds() > 0) {
                     java.util.concurrent.CompletableFuture.delayedExecutor(
@@ -594,6 +803,7 @@ public final class AuthManager {
             }
             if (cfg().forceLoginAfterRegister()) {
                 session.registered = true;
+                clearAuthentication(session);
                 MinecraftText.send(player, auth.message("reg.loginAfterRegister"));
                 return;
             }
@@ -620,14 +830,17 @@ public final class AuthManager {
         CompletableFuture
             .supplyAsync(() -> ds().lookupAuth(lower))
             .thenAccept(a -> executeMain(() -> {
+                if (!current(player, session)) return;
                 if (!a.successful()) { failDatabase(player, session); return; }
                 if (a.auth() == null) { MinecraftText.send(player, auth.message("unknown_user", "player", realName(player))); return; }
                 PasswordSecurity.VerificationResult r = sec().verify(oldPw, a.auth().toHashedPassword(), lower);
                 if (r == null) { MinecraftText.send(player, auth.message("changepassword.wrong")); return; }
                 HashedPassword newHash = sec().computeHash(newPw, lower);
                 CompletableFuture.supplyAsync(() -> ds().updatePassword(lower, newHash))
-                    .thenAccept(updated -> executeMain(() -> MinecraftText.send(player,
-                        auth.message(updated ? "changepassword.success" : "database.error"))))
+                    .thenAccept(updated -> executeMain(() -> {
+                        if (!current(player, session)) return;
+                        MinecraftText.send(player, auth.message(updated ? "changepassword.success" : "database.error"));
+                    }))
                     .exceptionally(error -> { executeMain(() -> MinecraftText.send(player, auth.message("database.error"))); return null; });
              }))
             .exceptionally(error -> { executeMain(() -> failDatabase(player, session)); return null; });
@@ -642,6 +855,7 @@ public final class AuthManager {
         }
         CompletableFuture.supplyAsync(() -> ds().setLoginFlags(lower, false, false))
             .thenAccept(updated -> executeMain(() -> {
+                if (!current(player, session)) return;
                 if (!updated) {
                     MinecraftText.send(player, auth.message("database.error"));
                     return;
@@ -650,7 +864,13 @@ public final class AuthManager {
                 session.pendingTotp = false;
                 runEventCommands("onLogout", player);
                 auth.emitProxyMessage(ProxyProtocol.LOGOUT, lower);
-                player.setInvulnerable(true);
+                session.frozenX = player.getX();
+                session.frozenY = player.getY();
+                session.frozenZ = player.getZ();
+                session.frozenWorld = worldKey(player);
+                session.joinTime = System.currentTimeMillis();
+                enterLimbo(player, session);
+                applyPermissionGroup(player, session);
                 MinecraftText.send(player, auth.message("logout.success"));
             }))
             .exceptionally(error -> { executeMain(() -> MinecraftText.send(player, auth.message("database.error"))); return null; });
@@ -659,18 +879,20 @@ public final class AuthManager {
     public void unregister(ServerPlayer player, String password) {
         String lower = realName(player).toLowerCase(Locale.ROOT);
         PlayerSession session = sessions.get(lower);
-        if (session == null) return;
+        if (session == null || !session.authenticated) return;
         CompletableFuture
             .supplyAsync(() -> ds().lookupAuth(lower))
             .thenAccept(a -> executeMain(() -> {
+                if (!current(player, session)) return;
                 if (!a.successful()) { failDatabase(player, session); return; }
                 if (a.auth() == null) { MinecraftText.send(player, auth.message("unknown_user", "player", realName(player))); return; }
                 PasswordSecurity.VerificationResult r = sec().verify(password, a.auth().toHashedPassword(), lower);
                 if (r == null) { MinecraftText.send(player, auth.message("unregister.wrong")); return; }
                 CompletableFuture.supplyAsync(() -> ds().removeAuth(lower))
                     .thenAccept(removed -> executeMain(() -> {
+                        if (!current(player, session)) return;
                         if (!removed) { MinecraftText.send(player, auth.message("database.error")); return; }
-                        sessions.remove(lower);
+                        sessions.remove(lower, session);
                         runEventCommands("onUnregister", player);
                         MinecraftText.send(player, auth.message("unregister.success"));
                         kick(player, auth.message("unregister.success"));
@@ -694,7 +916,7 @@ public final class AuthManager {
             session.captchaPending = false;
             session.captchaCode = "";
             session.loginAttempts = 0;
-            clearLoginFailures(session.lastIp);
+            clearLoginFailures(lower, session.lastIp);
             MinecraftText.send(player, auth.message("captcha.success"));
         } else {
             session.captchaCode = RandomStringUtils.generateNum(Math.max(3, cfg().captchaLength()));
@@ -710,17 +932,35 @@ public final class AuthManager {
         if (session == null || !session.pendingTotp) {
             return;
         }
-        if (!TotpProvider.validateCode(session.totpKey, code)) {
+        long now = System.currentTimeMillis();
+        if (session.totpBlockedUntil > now) {
             MinecraftText.send(player, auth.message("totp.wrong"));
             return;
         }
+        if (!beginAuthentication(player, session)) return;
         CompletableFuture
             .supplyAsync(() -> ds().lookupAuth(lower))
             .thenAccept(a -> executeMain(() -> {
+                if (!current(player, session)) return;
                 if (!a.successful()) { failDatabase(player, session); return; }
-                if (a.auth() == null) return;
-                completeLogin(player, session, a.auth(),
-                    () -> MinecraftText.send(player, auth.message("totp.success")));
+                PlayerAuth row = a.auth();
+                String currentTotpKey = row == null ? null : row.getTotpKey();
+                if (row == null || !TotpProvider.isPlausibleSecret(currentTotpKey)
+                    || !TotpProvider.validateCode(currentTotpKey, code)) {
+                    clearAuthentication(session);
+                    recordTotpFailure(session);
+                    CompletableFuture.runAsync(() -> recordLoginFailure(lower, session.lastIp));
+                    MinecraftText.send(player, auth.message("totp.wrong"));
+                    return;
+                }
+                clearTotpFailures(session);
+                boolean proxyLogin = session.proxyTotpPending;
+                session.proxyTotpPending = false;
+                session.totpKey = currentTotpKey;
+                completeLogin(player, session, row, () -> {
+                    if (proxyLogin) auth.emitProxyMessage(ProxyProtocol.PERFORM_LOGIN_ACK, lower);
+                    else MinecraftText.send(player, auth.message("totp.success"));
+                });
             }))
             .exceptionally(error -> { executeMain(() -> failDatabase(player, session)); return null; });
     }
@@ -735,6 +975,7 @@ public final class AuthManager {
         CompletableFuture
             .supplyAsync(() -> ds().lookupAuth(lower))
             .thenAccept(a -> executeMain(() -> {
+                if (!current(player, session)) return;
                 if (!a.successful()) { failDatabase(player, session); return; }
                 if (a.auth() != null && a.auth().getTotpKey() != null && !a.auth().getTotpKey().isEmpty()) {
                     MinecraftText.send(player, auth.message("totp.already"));
@@ -770,6 +1011,7 @@ public final class AuthManager {
         }
         CompletableFuture.supplyAsync(() -> ds().updateTotpKey(lower, secret))
             .thenAccept(updated -> executeMain(() -> {
+                if (!current(player, session)) return;
                 if (!updated) { MinecraftText.send(player, auth.message("database.error")); return; }
                 session.pendingTotpSetupKey = "";
                 MinecraftText.send(player, auth.message("totp.confirmed"));
@@ -787,6 +1029,7 @@ public final class AuthManager {
         CompletableFuture
             .supplyAsync(() -> ds().lookupAuth(lower))
             .thenAccept(a -> executeMain(() -> {
+                if (!current(player, session)) return;
                 if (!a.successful()) { failDatabase(player, session); return; }
                 if (a.auth() == null || a.auth().getTotpKey() == null || a.auth().getTotpKey().isEmpty()) {
                     MinecraftText.send(player, auth.message("totp.notEnabled"));
@@ -797,8 +1040,10 @@ public final class AuthManager {
                     return;
                 }
                 CompletableFuture.supplyAsync(() -> ds().updateTotpKey(lower, null))
-                    .thenAccept(updated -> executeMain(() -> MinecraftText.send(player,
-                        auth.message(updated ? "totp.disabled" : "database.error"))))
+                    .thenAccept(updated -> executeMain(() -> {
+                        if (!current(player, session)) return;
+                        MinecraftText.send(player, auth.message(updated ? "totp.disabled" : "database.error"));
+                    }))
                     .exceptionally(error -> { executeMain(() -> MinecraftText.send(player, auth.message("database.error"))); return null; });
             }))
             .exceptionally(error -> { executeMain(() -> failDatabase(player, session)); return null; });
@@ -824,6 +1069,7 @@ public final class AuthManager {
         UUID uuid = player.getUUID();
         CompletableFuture.supplyAsync(() -> ds().updatePremiumUuid(lower, uuid))
                     .thenAccept(updated -> executeMain(() -> {
+                        if (!current(player, session)) return;
                         MinecraftText.send(player, auth.message(updated ? "premium.set" : "database.error"));
                         if (updated) auth.emitProxyMessage(ProxyProtocol.PREMIUM_SET, lower);
                     }))
@@ -839,6 +1085,7 @@ public final class AuthManager {
         }
         CompletableFuture.supplyAsync(() -> ds().updatePremiumUuid(lower, null))
             .thenAccept(updated -> executeMain(() -> {
+                if (!current(player, session)) return;
                 MinecraftText.send(player, auth.message(updated ? "premium.removed" : "database.error"));
                 if (updated) auth.emitProxyMessage(ProxyProtocol.PREMIUM_UNSET, lower);
             }))
@@ -903,12 +1150,13 @@ public final class AuthManager {
             }
             String code = recoveryCode();
             EmailChallenge challenge = new EmailChallenge(email, code,
-                System.currentTimeMillis() + cfg().emailRecoveryTimeoutSeconds() * 1000L, false);
+                System.currentTimeMillis() + cfg().emailVerificationTimeoutSeconds() * 1000L, false);
             emailChallenges.put("verify:" + lower, challenge);
             CompletableFuture.supplyAsync(() -> EmailSender.send(cfg(), email, "AuthMe e-mail verification",
                     "Your AuthMe verification code is: " + code + "\nIt expires in "
-                        + (cfg().emailRecoveryTimeoutSeconds() / 60) + " minutes."))
+                        + (cfg().emailVerificationTimeoutSeconds() / 60) + " minutes."))
                 .thenAccept(sent -> executeMain(() -> {
+                    if (!current(player, session)) return;
                     if (!sent) {
                         emailChallenges.remove("verify:" + lower);
                         MinecraftText.send(player, auth.message("database.error"));
@@ -928,7 +1176,10 @@ public final class AuthManager {
             if (cfg().maxRegistrationsPerEmail() > 0 && count.count() >= cfg().maxRegistrationsPerEmail()) return "email.max";
             return ds().updateEmail(lower, email) ? "email.added" : "database.error";
         })
-            .thenAccept(key -> executeMain(() -> MinecraftText.send(player, auth.message(key))))
+            .thenAccept(key -> executeMain(() -> {
+                if (!current(player, session)) return;
+                MinecraftText.send(player, auth.message(key));
+            }))
             .exceptionally(error -> { executeMain(() -> MinecraftText.send(player, auth.message("database.error"))); return null; });
     }
 
@@ -948,15 +1199,22 @@ public final class AuthManager {
             if (cfg().maxRegistrationsPerEmail() > 0 && count.count() >= cfg().maxRegistrationsPerEmail()) return "email.max";
             return "ok";
         }).thenAccept(result -> executeMain(() -> {
+            if (!current(player, session)) return;
             if (!"ok".equals(result)) { MinecraftText.send(player, auth.message(result)); return; }
             if (cfg().emailRequireVerification()) {
                 if (!cfg().emailEnabled()) { MinecraftText.send(player, auth.message("email.recoveryDisabled")); return; }
                 String code = recoveryCode();
-                emailChallenges.put("verify:" + lower, new EmailChallenge(newValue, code, System.currentTimeMillis() + cfg().emailRecoveryTimeoutSeconds() * 1000L, false));
+                emailChallenges.put("verify:" + lower, new EmailChallenge(newValue, code, System.currentTimeMillis() + cfg().emailVerificationTimeoutSeconds() * 1000L, false));
                 CompletableFuture.supplyAsync(() -> EmailSender.send(cfg(), newValue, "AuthMe e-mail verification", "Your AuthMe verification code is: " + code))
-                    .thenAccept(sent -> executeMain(() -> MinecraftText.send(player, auth.message(sent ? "email.verifySent" : "database.error"))));
+                    .thenAccept(sent -> executeMain(() -> {
+                        if (!current(player, session)) return;
+                        MinecraftText.send(player, auth.message(sent ? "email.verifySent" : "database.error"));
+                    }));
             } else CompletableFuture.supplyAsync(() -> ds().updateEmail(lower, newValue))
-                .thenAccept(updated -> executeMain(() -> MinecraftText.send(player, auth.message(updated ? "email.changed" : "database.error"))));
+                .thenAccept(updated -> executeMain(() -> {
+                    if (!current(player, session)) return;
+                    MinecraftText.send(player, auth.message(updated ? "email.changed" : "database.error"));
+                }));
         })).exceptionally(error -> { executeMain(() -> MinecraftText.send(player, auth.message("database.error"))); return null; });
     }
 
@@ -970,8 +1228,20 @@ public final class AuthManager {
             return;
         }
         String lower = realName(player).toLowerCase(Locale.ROOT);
+        PlayerSession session = sessions.get(lower);
+        if (session == null) {
+            MinecraftText.send(player, auth.message("email.recoverySent"));
+            return;
+        }
+        if (!beginEmailRecovery(lower, ip(player))) {
+            // Keep the response indistinguishable from a normal recovery
+            // request so the cooldown cannot be used for account discovery.
+            MinecraftText.send(player, auth.message("email.recoverySent"));
+            return;
+        }
         CompletableFuture.supplyAsync(() -> ds().getAuthByEmail(email.trim()))
             .thenAccept(account -> executeMain(() -> {
+                if (!current(player, session)) return;
                 if (account == null || account.getName() == null || !account.getName().equalsIgnoreCase(lower)
                     || account.getEmail() == null || !account.getEmail().equalsIgnoreCase(email.trim())) {
                     // Do not disclose whether an address is registered.
@@ -986,6 +1256,7 @@ public final class AuthManager {
                     "AuthMe password recovery", "Your AuthMe recovery code is: " + code
                         + "\nIt expires in " + (cfg().emailRecoveryTimeoutSeconds() / 60) + " minutes."))
                     .thenAccept(sent -> executeMain(() -> {
+                        if (!current(player, session)) return;
                         if (!sent) {
                             emailChallenges.remove("recover:" + lower);
                             // Keep recovery responses indistinguishable even when SMTP fails.
@@ -998,22 +1269,42 @@ public final class AuthManager {
             .exceptionally(error -> { executeMain(() -> MinecraftText.send(player, auth.message("email.recoverySent"))); return null; });
     }
 
+    private boolean beginEmailRecovery(String playerName, String address) {
+        String key = playerName + "\u0000" + normalizeIp(address);
+        long now = System.currentTimeMillis();
+        long cooldown = Math.max(1L, cfg().emailRecoveryCooldownSeconds()) * 1000L;
+        synchronized (emailRecoveryLastSent) {
+            emailRecoveryLastSent.entrySet().removeIf(entry -> now - entry.getValue() >= cooldown);
+            Long previous = emailRecoveryLastSent.get(key);
+            if (previous != null && now - previous < cooldown) return false;
+            if (emailRecoveryLastSent.size() >= MAX_EMAIL_RECOVERY_ENTRIES) {
+                java.util.Iterator<String> iterator = emailRecoveryLastSent.keySet().iterator();
+                if (iterator.hasNext()) emailRecoveryLastSent.remove(iterator.next());
+            }
+            emailRecoveryLastSent.put(key, now);
+            return true;
+        }
+    }
+
     public void emailConfirm(ServerPlayer player, String code) {
         String lower = realName(player).toLowerCase(Locale.ROOT);
+        PlayerSession session = sessions.get(lower);
         EmailChallenge recovery = emailChallenges.get("recover:" + lower);
         EmailChallenge verification = emailChallenges.get("verify:" + lower);
         EmailChallenge challenge = recovery != null ? recovery : verification;
         boolean valid = challenge != null && challenge.expiresAt >= System.currentTimeMillis()
             && constantTimeEquals(challenge.code, code);
         if (!valid) {
-            if (challenge != null && ++challenge.failedAttempts >= 5) {
+            if (challenge != null && ++challenge.failedAttempts >= cfg().emailRecoveryMaxAttempts()) {
                 emailChallenges.remove(challenge.recovery ? "recover:" + lower : "verify:" + lower, challenge);
             }
             MinecraftText.send(player, auth.message(recovery != null ? "email.recoveryCodeWrong" : "email.verifyWrong"));
             return;
         }
+        if (!current(player, session)) return;
         if (challenge.recovery) {
             challenge.verified = true;
+            challenge.verifiedAt = System.currentTimeMillis();
             MinecraftText.send(player, auth.message("email.recoveryCode"));
         } else {
             CompletableFuture.supplyAsync(() -> {
@@ -1022,8 +1313,10 @@ public final class AuthManager {
                 if (cfg().maxRegistrationsPerEmail() > 0 && count.count() >= cfg().maxRegistrationsPerEmail()) return "email.max";
                 return ds().updateEmail(lower, challenge.email) ? "email.verified" : "database.error";
             }).thenAccept(key -> executeMain(() -> {
+                    if (!current(player, session)) return;
                     if (!"email.verified".equals(key)) { MinecraftText.send(player, auth.message(key)); return; }
                     challenge.verified = true;
+                    challenge.verifiedAt = System.currentTimeMillis();
                     emailChallenges.remove("verify:" + lower);
                     MinecraftText.send(player, auth.message(key));
                 }))
@@ -1036,8 +1329,12 @@ public final class AuthManager {
         String lower = realName(player).toLowerCase(Locale.ROOT);
         EmailChallenge challenge = emailChallenges.get("recover:" + lower);
         PlayerSession session = sessions.get(lower);
+        long passwordDeadline = challenge == null ? 0L
+            : challenge.verifiedAt > 0L
+                ? challenge.verifiedAt + cfg().emailPasswordChangeTimeoutSeconds() * 1000L
+                : challenge.expiresAt;
         if (challenge == null || !challenge.recovery || !challenge.verified
-            || challenge.expiresAt < System.currentTimeMillis()) {
+            || passwordDeadline < System.currentTimeMillis()) {
             MinecraftText.send(player, auth.message("email.recoveryCodeWrong"));
             return;
         }
@@ -1045,10 +1342,14 @@ public final class AuthManager {
             MinecraftText.send(player, auth.message("reg.usage"));
             return;
         }
+        if (session == null || !beginAuthentication(player, session)) return;
         HashedPassword hash = sec().computeHash(password, lower);
-        CompletableFuture.supplyAsync(() -> ds().updatePassword(lower, hash) ? ds().lookupAuth(lower) : null)
+        CompletableFuture.supplyAsync(() -> ds().updatePasswordAndClearLogin(lower, hash)
+                ? ds().lookupAuth(lower) : null)
             .thenAccept(result -> executeMain(() -> {
+                if (!current(player, session)) return;
                 if (result == null || !result.successful() || result.auth() == null || session == null) {
+                    clearAuthentication(session);
                     MinecraftText.send(player, auth.message("database.error"));
                     return;
                 }
@@ -1057,11 +1358,17 @@ public final class AuthManager {
                 completeLogin(player, session, result.auth(),
                     () -> MinecraftText.send(player, auth.message("email.recoveryPassword")));
             }))
-            .exceptionally(error -> { executeMain(() -> MinecraftText.send(player, auth.message("database.error"))); return null; });
+            .exceptionally(error -> {
+                executeMain(() -> { clearAuthentication(session); MinecraftText.send(player, auth.message("database.error")); });
+                return null;
+            });
     }
 
     private String recoveryCode() {
-        return String.format(Locale.ROOT, "%08d", secureRandom.nextInt(100_000_000));
+        int length = cfg().emailRecoveryCodeLength();
+        StringBuilder code = new StringBuilder(length);
+        for (int i = 0; i < length; i++) code.append(secureRandom.nextInt(10));
+        return code.toString();
     }
 
     private static boolean constantTimeEquals(String left, String right) {
@@ -1072,12 +1379,18 @@ public final class AuthManager {
 
     public void emailShow(ServerPlayer player) {
         String lower = realName(player).toLowerCase(Locale.ROOT);
+        PlayerSession session = sessions.get(lower);
+        if (session == null || !session.authenticated) {
+            MinecraftText.send(player, auth.message("not_logged_in"));
+            return;
+        }
         CompletableFuture
             .supplyAsync(() -> ds().lookupAuth(lower))
             .thenAccept(a -> executeMain(() -> {
+                if (!current(player, session)) return;
                 if (!a.successful()) { MinecraftText.send(player, auth.message("database.error")); return; }
                 if (a.auth() == null) { MinecraftText.send(player, auth.message("unknown_user", "player", realName(player))); return; }
-                MinecraftText.send(player, auth.message("email.show", "email", a.auth().getEmail() == null ? "" : a.auth().getEmail()));
+                MinecraftText.send(player, auth.message("email.show", "email", displayEmail(a.auth().getEmail())));
             }))
             .exceptionally(error -> { executeMain(() -> MinecraftText.send(player, auth.message("database.error"))); return null; });
     }
@@ -1115,11 +1428,7 @@ public final class AuthManager {
             boolean removed = ds().removeAuth(targetLower);
             PlayerSession online = sessions.get(targetLower);
             if (online != null && removed) {
-                online.authenticated = false;
-                executeMain(() -> {
-                    net.minecraft.server.level.ServerPlayer p = onlinePlayer(online.uuid);
-                    if (p != null) kick(p, auth.message("unregister.success"));
-                });
+                executeMain(() -> invalidateRemovedAccountSession(targetLower));
             }
             if (removed) {
                 executeMain(onComplete);
@@ -1176,15 +1485,30 @@ public final class AuthManager {
             return ds().removeAuth(targetLower) ? "admin.unregistered" : "database.error";
         }).thenAccept(key -> executeMain(() -> {
             if ("admin.unregistered".equals(key)) {
-                PlayerSession online = sessions.remove(targetLower);
-                if (online != null) {
-                    online.authenticated = false;
-                    ServerPlayer p = onlinePlayer(online.uuid);
-                    if (p != null) kick(p, auth.message("unregister.success"));
-                }
+                invalidateRemovedAccountSession(targetLower);
             }
             reply.accept(auth.message(key, "player", targetLower));
         })).exceptionally(error -> { executeMain(() -> reply.accept(auth.message("database.error"))); return null; });
+    }
+
+    /** Removes an online session after its account row was deleted, without persisting logout data. */
+    private void invalidateRemovedAccountSession(String targetLower) {
+        PlayerSession online = sessions.get(targetLower);
+        if (online == null) return;
+        online.authenticated = false;
+        online.pendingTotp = false;
+        online.active = false;
+        online.loginGeneration++;
+        ServerPlayer player = onlinePlayer(online.uuid);
+        if (player != null) {
+            setBlindEffect(player, false);
+            restoreLimbo(player, online);
+            kick(player, auth.message("unregister.success"));
+        } else {
+            restoreLimbo(null, online);
+            limboStore.remove(online.uuid);
+        }
+        sessions.remove(targetLower, online);
     }
 
     public void adminSetPassword(String targetLower, String password, Consumer<String> reply) {
@@ -1200,6 +1524,11 @@ public final class AuthManager {
     }
 
     public void adminAuth(String targetLower, java.util.function.Consumer<String> reply) {
+        PlayerSession targetSession = sessions.get(targetLower);
+        if (!canBeForced(targetSession)) {
+            reply.accept(auth.message("admin.notAllowed"));
+            return;
+        }
         CompletableFuture.supplyAsync(() -> {
             DataSource.LookupResult lookup = ds().lookupAuth(targetLower);
             if (!lookup.successful()) return "database.error";
@@ -1213,7 +1542,9 @@ public final class AuthManager {
                     online.pendingTotp = false;
                     ServerPlayer p = onlinePlayer(online.uuid);
                     if (p != null) {
-                        p.setInvulnerable(false);
+                        restoreLimbo(p, online);
+                        JoinLeaveMessageBridge.onAuthenticated(p);
+                        setBlindEffect(p, false);
                         MinecraftText.send(p, auth.message("login.success"));
                     }
                 }
@@ -1236,7 +1567,13 @@ public final class AuthManager {
                     online.pendingTotp = false;
                     ServerPlayer p = onlinePlayer(online.uuid);
                     if (p != null) {
-                        p.setInvulnerable(true);
+                        online.frozenX = p.getX();
+                        online.frozenY = p.getY();
+                        online.frozenZ = p.getZ();
+                        online.frozenWorld = worldKey(p);
+                        online.joinTime = System.currentTimeMillis();
+                        enterLimbo(p, online);
+                        applyPermissionGroup(p, online);
                         MinecraftText.send(p, auth.message("not_logged_in"));
                     }
                 }
@@ -1366,12 +1703,16 @@ public final class AuthManager {
 
     public void purge(int days, Consumer<String> reply) {
         long cutoff = System.currentTimeMillis() - Math.max(1, days) * 86_400_000L;
-        CompletableFuture.supplyAsync(() -> purgeOld(cutoff)).thenAccept(result -> executeMain(() -> reply.accept(result.operation().successful() ? auth.message("admin.purged", "count", result.operation().affected()) : auth.message("database.error"))));
+        java.util.Set<String> bypassNames = snapshotPurgeBypassNames();
+        boolean onlineMode = auth.server() != null && auth.server().usesAuthentication();
+        CompletableFuture.supplyAsync(() -> purgeOld(cutoff, bypassNames, onlineMode)).thenAccept(result -> executeMain(() -> reply.accept(result.operation().successful() ? auth.message("admin.purged", "count", result.operation().affected()) : auth.message("database.error"))));
     }
 
     private void runAutoPurge() {
         long cutoff = System.currentTimeMillis() - cfg().purgeDays() * 86_400_000L;
-        CompletableFuture.supplyAsync(() -> purgeOld(cutoff))
+        java.util.Set<String> bypassNames = snapshotPurgeBypassNames();
+        boolean onlineMode = auth.server() != null && auth.server().usesAuthentication();
+        CompletableFuture.supplyAsync(() -> purgeOld(cutoff, bypassNames, onlineMode))
             .thenAccept(result -> {
                 if (result.operation().successful()) Log.info("Automatic AuthMe purge removed " + result.operation().affected() + " account(s) and " + result.files() + " related file(s).");
                 else Log.error("Automatic AuthMe purge failed.");
@@ -1387,13 +1728,14 @@ public final class AuthManager {
     }
 
     public void purgePlayer(String targetLower, boolean force, Consumer<String> reply) {
+        boolean onlineMode = auth.server() != null && auth.server().usesAuthentication();
         CompletableFuture.supplyAsync(() -> {
             DataSource.LookupResult lookup = ds().lookupAuth(targetLower);
             if (!lookup.successful()) return new PurgeResult(new DataSource.OperationResult(0, false), List.of(), 0);
             if (lookup.auth() == null) return new PurgeResult(new DataSource.OperationResult(0, true), List.of(), 0);
             if (!force) return new PurgeResult(new DataSource.OperationResult(-1, true), List.of(lookup.auth()), 0);
             boolean removed = ds().removeAuth(targetLower);
-            int files = removed ? PurgeFileCleaner.clean(FabricLoader.getInstance().getGameDir(), cfg(), List.of(lookup.auth()), auth.server() != null && auth.server().usesAuthentication()) : 0;
+            int files = removed ? PurgeFileCleaner.clean(FabricLoader.getInstance().getGameDir(), cfg(), List.of(lookup.auth()), onlineMode) : 0;
             return new PurgeResult(new DataSource.OperationResult(removed ? 1 : 0, true), List.of(lookup.auth()), files);
         }).thenAccept(result -> executeMain(() -> {
             if (!result.operation().successful()) reply.accept(auth.message("database.error"));
@@ -1403,28 +1745,60 @@ public final class AuthManager {
         })).exceptionally(error -> { executeMain(() -> reply.accept(auth.message("database.error"))); return null; });
     }
 
-    private PurgeResult purgeOld(long cutoff) {
+    private PurgeResult purgeOld(long cutoff, java.util.Set<String> bypassNames, boolean onlineMode) {
         DataSource.QueryResult<List<PlayerAuth>> candidates = ds().queryPurgeCandidates(cutoff, 10000);
         if (!candidates.successful()) return new PurgeResult(new DataSource.OperationResult(0, false), List.of(), 0);
-        DataSource.OperationResult operation = ds().purgeRegisteredBefore(cutoff, 10000);
-        int files = operation.successful() ? PurgeFileCleaner.clean(FabricLoader.getInstance().getGameDir(), cfg(), candidates.value(), auth.server() != null && auth.server().usesAuthentication()) : 0;
-        return new PurgeResult(operation, candidates.value(), files);
+        List<PlayerAuth> removable = candidates.value().stream()
+            .filter(account -> !bypassesPurge(account, bypassNames)).toList();
+        List<PlayerAuth> removedAccounts = new java.util.ArrayList<>();
+        boolean successful = true;
+        for (PlayerAuth account : removable) {
+            DataSource.OperationResult removed = ds().removeAuthIfUnchanged(account, cutoff);
+            if (!removed.successful()) {
+                successful = false;
+                break;
+            }
+            if (removed.affected() > 0) removedAccounts.add(account);
+        }
+        DataSource.OperationResult operation = new DataSource.OperationResult(
+            removedAccounts.size(), successful);
+        int files = successful ? PurgeFileCleaner.clean(FabricLoader.getInstance().getGameDir(), cfg(), removedAccounts, onlineMode) : 0;
+        return new PurgeResult(operation, removedAccounts, files);
+    }
+
+    private java.util.Set<String> snapshotPurgeBypassNames() {
+        java.util.Set<String> names = new java.util.HashSet<>();
+        for (PlayerSession session : sessions.values()) {
+            ServerPlayer online = session == null ? null : onlinePlayer(session.uuid);
+            if (online != null && hasAuthMePermission(online, "authme.bypasspurge")) {
+                names.add(session.name.toLowerCase(Locale.ROOT));
+            }
+        }
+        return java.util.Set.copyOf(names);
+    }
+
+    private static boolean bypassesPurge(PlayerAuth account, java.util.Set<String> bypassNames) {
+        return account != null && account.getName() != null && bypassNames != null
+            && bypassNames.contains(account.getName().toLowerCase(Locale.ROOT));
     }
 
     public void purgeBannedPlayers(Consumer<String> reply) {
-        java.util.Set<String> banned = auth.server() == null ? java.util.Set.of()
-            : BanListBridge.names(auth.server().getPlayerList());
-        CompletableFuture.supplyAsync(() -> {
+        executeMain(() -> {
+            java.util.Set<String> banned = auth.server() == null ? java.util.Set.of()
+                : BanListBridge.names(auth.server().getPlayerList());
+            boolean onlineMode = auth.server() != null && auth.server().usesAuthentication();
+            CompletableFuture.supplyAsync(() -> {
             int removed = 0;
             java.util.List<PlayerAuth> purged = new java.util.ArrayList<>();
             for (String name : banned) {
                 DataSource.LookupResult lookup = ds().lookupAuth(name);
                 if (lookup.successful() && lookup.auth() != null && ds().removeAuth(name)) { removed++; purged.add(lookup.auth()); }
             }
-            PurgeFileCleaner.clean(FabricLoader.getInstance().getGameDir(), cfg(), purged, auth.server() != null && auth.server().usesAuthentication());
+            PurgeFileCleaner.clean(FabricLoader.getInstance().getGameDir(), cfg(), purged, onlineMode);
             return removed;
-        }).thenAccept(count -> executeMain(() -> reply.accept(auth.message("admin.purgedBanned", "count", count))))
-            .exceptionally(error -> { executeMain(() -> reply.accept(auth.message("database.error"))); return null; });
+            }).thenAccept(count -> executeMain(() -> reply.accept(auth.message("admin.purgedBanned", "count", count))))
+                .exceptionally(error -> { executeMain(() -> reply.accept(auth.message("database.error"))); return null; });
+        });
     }
 
     public void resetPosition(String targetLower, Consumer<String> reply) {
@@ -1471,10 +1845,37 @@ public final class AuthManager {
             else reply.accept("&7Usage: /authme debug valid <password|email> <value>");
             return;
         }
+        if ("mysqldef".equals(section)) {
+            DataSource.MySqlDefinitionOperation operation = null;
+            if (arg1 != null) {
+                try {
+                    operation = DataSource.MySqlDefinitionOperation.valueOf(arg1.trim().toUpperCase(Locale.ROOT));
+                } catch (IllegalArgumentException ignored) {
+                    // Keep invalid operator input away from the SQL builder.
+                }
+            }
+            if (operation == null || (operation != DataSource.MySqlDefinitionOperation.DETAILS
+                && (arg2 == null || arg2.isBlank()))) {
+                reply.accept("&7Usage: /authme debug mysqldef add|remove <LASTLOGIN|LASTIP|EMAIL>");
+                reply.accept("&7       /authme debug mysqldef details");
+                return;
+            }
+            DataSource.MySqlDefinitionOperation selected = operation;
+            CompletableFuture.supplyAsync(() -> ds().mysqlDefinition(selected, arg2))
+                .thenAccept(result -> executeMain(() -> {
+                    if (!result.supported() || !result.successful()) reply.accept("&c" + result.error());
+                    else result.lines().forEach(reply);
+                }))
+                .exceptionally(error -> {
+                    executeMain(() -> reply.accept(auth.message("database.error")));
+                    return null;
+                });
+            return;
+        }
         if ("spawn".equals(section)) {
             reply.accept("&7spawn=" + spawnStore.get("spawn") + " firstSpawn=" + spawnStore.get("firstspawn")); return;
         }
-        reply.accept("&cUnknown debug section '&f" + child + "&c'. Supported on Fabric: stats, db, cty, valid, spawn.");
+        reply.accept("&cUnknown debug section '&f" + child + "&c'. Supported on Fabric: stats, db, cty, valid, mysqldef, spawn.");
     }
 
     public void setSpawn(ServerPlayer player, boolean first, Consumer<String> reply) {
@@ -1489,11 +1890,11 @@ public final class AuthManager {
     private boolean teleportToConfiguredSpawn(ServerPlayer player, boolean first) {
         SpawnLocation location = spawnStore.get(first ? "firstSpawn" : "spawn");
         if (location == null) {
-            net.minecraft.core.BlockPos pos = player.level().getSharedSpawnPos();
+            net.minecraft.core.BlockPos pos = MinecraftCompat.serverLevel(player).getSharedSpawnPos();
             location = new SpawnLocation(worldKey(player), pos.getX() + 0.5, pos.getY(), pos.getZ() + 0.5, player.getYRot(), player.getXRot());
         }
         if (!location.world().equalsIgnoreCase(worldKey(player))) return false;
-        player.teleportTo(player.serverLevel(), location.x(), location.y(), location.z(), java.util.Set.of(), location.yaw(), location.pitch());
+        MinecraftCompat.teleport(player, location.x(), location.y(), location.z(), location.yaw(), location.pitch());
         player.setDeltaMovement(Vec3.ZERO);
         return true;
     }
@@ -1502,10 +1903,18 @@ public final class AuthManager {
         CompletableFuture.supplyAsync(() -> {
             try {
                 Path directory = cfg().configDir().resolve("backups");
-                Files.createDirectories(directory);
-                Path file = directory.resolve("authme-" + java.time.format.DateTimeFormatter
+                if (Files.isSymbolicLink(directory)) return null;
+                io.github.authme.fabric.util.SecureFileAccess.ensurePrivateDirectory(directory);
+                Path safeDirectory = directory.toAbsolutePath().normalize();
+                Path file = safeDirectory.resolve("authme-" + java.time.format.DateTimeFormatter
                     .ofPattern("yyyyMMdd-HHmmss").withZone(java.time.ZoneOffset.UTC)
                     .format(java.time.Instant.now()) + ".sql");
+                if (java.nio.file.Files.exists(file, java.nio.file.LinkOption.NOFOLLOW_LINKS)) {
+                    file = safeDirectory.resolve("authme-" + java.time.format.DateTimeFormatter
+                        .ofPattern("yyyyMMdd-HHmmss").withZone(java.time.ZoneOffset.UTC)
+                        .format(java.time.Instant.now()) + "-" + Long.toUnsignedString(System.nanoTime()) + ".sql");
+                }
+                if (!file.startsWith(safeDirectory)) return null;
                 return ds().backup(file) ? file : null;
             } catch (Exception e) {
                 Log.error("Could not create AuthMe backup", e);
@@ -1518,6 +1927,42 @@ public final class AuthManager {
     }
 
     // ===================================================================== queries used by events / mixin
+
+    /** Records a successfully opened menu so the container-click guard can apply the configured exception. */
+    public void recordInventoryOpen(ServerPlayer player, int containerId, String title) {
+        if (player == null || !cfg().protectInventoryBeforeLogin() || !isUnauthenticated(player)) {
+            if (player != null) unrestrictedInventoryRegistry.clear(player.getUUID());
+            return;
+        }
+        unrestrictedInventoryRegistry.record(player.getUUID(), containerId, title);
+    }
+
+    public void clearInventoryOpen(ServerPlayer player) {
+        if (player != null) unrestrictedInventoryRegistry.clear(player.getUUID());
+    }
+
+    public boolean allowInventoryClick(ServerPlayer player, int containerId) {
+        return player != null && cfg().protectInventoryBeforeLogin() && isUnauthenticated(player)
+            && unrestrictedInventoryRegistry.allows(player.getUUID(), containerId,
+                cfg().unrestrictedInventories());
+    }
+
+    /** Allows the initial right-click only when the targeted block exposes a configured menu title. */
+    public boolean allowUnrestrictedBlock(ServerPlayer player, Object level, BlockPos pos) {
+        if (player == null || !(level instanceof Level actualLevel) || pos == null || !cfg().protectInventoryBeforeLogin()
+            || !isUnauthenticated(player)) return false;
+        if (!(actualLevel.getBlockEntity(pos) instanceof MenuProvider provider)) return false;
+        return UnrestrictedInventoryRegistry.matches(provider.getDisplayName().getString(),
+            cfg().unrestrictedInventories());
+    }
+
+    /** Allows entity-backed menus (for example a modded NPC menu) with a configured title. */
+    public boolean allowUnrestrictedEntity(ServerPlayer player, Entity entity) {
+        if (player == null || entity == null || !cfg().protectInventoryBeforeLogin()
+            || !isUnauthenticated(player) || !(entity instanceof MenuProvider provider)) return false;
+        return UnrestrictedInventoryRegistry.matches(provider.getDisplayName().getString(),
+            cfg().unrestrictedInventories());
+    }
 
     public boolean isUnauthenticated(ServerPlayer player) {
         if (!cfg().restrictUnauthenticated()) return false;
@@ -1532,17 +1977,42 @@ public final class AuthManager {
         return s != null && s.authenticated;
     }
 
+    /** AuthMe's explicit exception for chat before authentication. */
+    public boolean allowChatBeforeLogin(ServerPlayer player) {
+        return !isUnauthenticated(player) || cfg().allowChat()
+            || hasAuthMePermission(player, "authme.allowchatbeforelogin");
+    }
+
+    /** Sends AntiBot lifecycle notices only to players with the upstream admin visibility node. */
+    public void notifyAntiBotAdmins(String key, Object... replacements) {
+        MinecraftServer server = auth.server();
+        if (server == null || key == null || key.isBlank()) return;
+        for (ServerPlayer online : server.getPlayerList().getPlayers()) {
+            if (hasAuthMePermission(online, "authme.admin.antibotmessages")) {
+                MinecraftText.send(online, auth.message(key, replacements));
+            }
+        }
+    }
+
+    /** Returns whether the chat broadcast should omit this viewer. */
+    public boolean hideChatFrom(ServerPlayer viewer) {
+        return viewer != null && cfg().hideChat() && isUnauthenticated(viewer);
+    }
+
+    /** The player-scoped account privacy permission, separate from admin diagnostics. */
+    public boolean canSeeOwnAccounts(ServerPlayer player) {
+        return hasAuthMePermission(player, "authme.player.seeownaccounts");
+    }
+
     private void hideTabEntry(ServerPlayer subject) {
         MinecraftServer server = auth.server();
         if (server == null) return;
-        ClientboundPlayerInfoRemovePacket subjectRemoval =
-            new ClientboundPlayerInfoRemovePacket(List.of(subject.getUUID()));
         for (ServerPlayer viewer : server.getPlayerList().getPlayers()) {
-            viewer.connection.send(subjectRemoval);
+            MinecraftCompat.removeTabEntry(viewer, subject);
         }
         for (ServerPlayer viewer : server.getPlayerList().getPlayers()) {
             if (viewer != subject && isUnauthenticated(viewer)) {
-                subject.connection.send(new ClientboundPlayerInfoRemovePacket(List.of(viewer.getUUID())));
+                MinecraftCompat.removeTabEntry(subject, viewer);
             }
         }
     }
@@ -1550,21 +2020,29 @@ public final class AuthManager {
     private void showTabEntry(ServerPlayer subject) {
         MinecraftServer server = auth.server();
         if (server == null) return;
-        ClientboundPlayerInfoUpdatePacket packet = new ClientboundPlayerInfoUpdatePacket(
-            EnumSet.of(ClientboundPlayerInfoUpdatePacket.Action.ADD_PLAYER), List.of(subject));
         for (ServerPlayer viewer : server.getPlayerList().getPlayers()) {
-            viewer.connection.send(packet);
+            MinecraftCompat.addTabEntry(viewer, subject);
         }
     }
 
     public boolean isCommandAllowed(ServerPlayer player, String rootToken) {
         if (rootToken == null) return true;
-        String t = rootToken.toLowerCase(Locale.ROOT);
-        for (String allowed : cfg().allowedCommands()) {
-            if (t.equals(allowed.toLowerCase(Locale.ROOT))) return true;
+        PlayerSession session = player == null ? null : sessions.get(realName(player).toLowerCase(Locale.ROOT));
+        long quickDelay = cfg().quickCommandsDenyBeforeMilliseconds();
+        if (session != null && !session.authenticated && quickDelay > 0L
+            && System.currentTimeMillis() - session.joinTime < quickDelay
+            && quickCommandProtectionEnabled(player)) {
+            kick(player, auth.message("quickcommands.tooFast"));
+            return false;
         }
+        return CommandTokenPolicy.isAllowed(rootToken, cfg().allowedCommands());
+    }
 
-        return false;
+    private boolean quickCommandProtectionEnabled(ServerPlayer player) {
+        if (player == null) return false;
+        return QuickCommandPolicy.enabled(cfg().permissionCheckEnabled(),
+            hasAuthMePermission(player, "authme.player.protection.quickcommandsprotection"),
+            PermissionBridge.providerPresent());
     }
 
     // ===================================================================== tick
@@ -1592,10 +2070,32 @@ public final class AuthManager {
         for (PlayerSession s : sessions.values()) {
             ServerPlayer p = onlinePlayer(s.uuid);
             if (p == null) continue;
-            if (s.authenticated) continue;
-            if (!s.accountResolved) continue;
+            if (s.authenticated) {
+                if (tickCounter % 100 == 0) checkLoginLease(p, s);
+                continue;
+            }
+            if (!cfg().restrictUnauthenticated()) {
+                if (s.limboCaptured) restoreLimbo(p, s);
+                setBlindEffect(p, false);
+                continue;
+            }
+            if (!s.accountResolved) {
+                if (!cfg().allowMovement()) {
+                    double dx = p.getX() - s.frozenX;
+                    double dy = p.getY() - s.frozenY;
+                    double dz = p.getZ() - s.frozenZ;
+                    double radius = Math.max(0.0, cfg().allowedMovementRadius());
+                    if (radius > 0.0d && (dx * dx + dz * dz > radius * radius || Math.abs(dy) > 0.1)) {
+                        MinecraftCompat.teleport(p, s.frozenX, s.frozenY, s.frozenZ,
+                            p.getYRot(), p.getXRot());
+                    }
+                }
+                if (cfg().removeSpeed()) p.setDeltaMovement(Vec3.ZERO);
+                continue;
+            }
             if (!s.registered && !cfg().registrationForce()) {
-                p.setInvulnerable(false);
+                restoreLimbo(p, s);
+                setBlindEffect(p, false);
                 continue;
             }
             // freeze
@@ -1605,8 +2105,8 @@ public final class AuthManager {
                 double dz = p.getZ() - s.frozenZ;
                 double radius = Math.max(0.0, cfg().allowedMovementRadius());
                 double horiz = dx * dx + dz * dz;
-                if (horiz > radius * radius || Math.abs(dy) > 0.1) {
-                    p.teleportTo(p.serverLevel(), s.frozenX, s.frozenY, s.frozenZ, java.util.Set.of(), p.getYRot(), p.getXRot());
+                if (radius > 0.0d && (horiz > radius * radius || Math.abs(dy) > 0.1)) {
+                    MinecraftCompat.teleport(p, s.frozenX, s.frozenY, s.frozenZ, p.getYRot(), p.getXRot());
                     p.setDeltaMovement(Vec3.ZERO);
                 }
             }
@@ -1627,10 +2127,34 @@ public final class AuthManager {
         if (tickCounter % 6000 == 0) {
             // periodic cache cleanup
             sessions.entrySet().removeIf(e -> onlinePlayer(e.getValue().uuid) == null);
+            long cutoff = System.currentTimeMillis()
+                - Math.max(60L, cfg().emailRecoveryCooldownSeconds()) * 2_000L;
+            emailRecoveryLastSent.entrySet().removeIf(e -> e.getValue() < cutoff);
         }
     }
 
     // ===================================================================== internals
+
+    private void checkLoginLease(ServerPlayer player, PlayerSession session) {
+        if (session.loginLeaseCheckInFlight || session.lastLogin <= 0L) return;
+        session.loginLeaseCheckInFlight = true;
+        long expected = session.lastLogin;
+        CompletableFuture.supplyAsync(() -> ds().renewLoginLease(
+            session.name, expected, System.currentTimeMillis())).thenAccept(result ->
+            executeMain(() -> {
+                session.loginLeaseCheckInFlight = false;
+                if (!session.active || sessions.get(session.name) != session || offline(player)
+                    || !session.authenticated || session.lastLogin != expected) return;
+                if (!result.successful()) {
+                    failDatabase(player, session);
+                    return;
+                }
+                if (!result.active() && cfg().forceSingleSession()) {
+                    session.authenticated = false;
+                    kick(player, "Your AuthMe account was logged in from another location.");
+                }
+            }));
+    }
 
     private void schedulePrompt(ServerPlayer player, PlayerSession session, boolean registered) {
         if (registered) {
@@ -1650,18 +2174,27 @@ public final class AuthManager {
         session.captchaCode = RandomStringUtils.generateNum(Math.max(3, cfg().captchaLength()));
     }
 
-    private record ScheduledCommand(long dueTick, ServerPlayer player, EventCommands.ConfiguredCommand command, String text) { }
+    private record ScheduledCommand(long dueTick, ServerPlayer player, PlayerSession session,
+                                    EventCommands.ConfiguredCommand command, String text) { }
 
     private void runEventCommands(String event, ServerPlayer player) {
         if (player == null) return;
+        PlayerSession eventSession = sessions.get(realName(player).toLowerCase(Locale.ROOT));
         for (EventCommands.ConfiguredCommand command : eventCommands.get(event)) {
-            if (command.accountsAtLeast() < 0 && command.accountsLessThan() < 0) { scheduleCommand(player, command); continue; }
+            if (command.accountsAtLeast() < 0 && command.accountsLessThan() < 0) {
+                if (eventSession != null && !current(player, eventSession)) return;
+                scheduleCommand(player, eventSession, command);
+                continue;
+            }
             CompletableFuture.supplyAsync(() -> ds().queryRegisteredNamesByIp(ip(player))).thenAccept(result -> executeMain(() -> {
+                // The account-count query may finish after disconnect/reconnect. Do not
+                // execute an event belonging to an obsolete player session.
+                if (eventSession != null && !current(player, eventSession)) return;
                 if (!result.successful()) return;
                 int count = result.value().size();
                 if (command.accountsAtLeast() >= 0 && count < command.accountsAtLeast()) return;
                 if (command.accountsLessThan() >= 0 && count >= command.accountsLessThan()) return;
-                scheduleCommand(player, command);
+                scheduleCommand(player, eventSession, command);
             }));
         }
     }
@@ -1674,21 +2207,32 @@ public final class AuthManager {
             String command = configured.trim();
             if (command.startsWith("/")) command = command.substring(1);
             command = command.replace("%p", realName(player)).replace("%nick", realName(player)).replace("%ip", ip(player));
-            server.getCommands().performPrefixedCommand(server.createCommandSourceStack().withSuppressedOutput(), command);
+            try {
+                MinecraftCompat.performCommand(server.getCommands(),
+                    server.createCommandSourceStack().withSuppressedOutput(), command);
+            } catch (RuntimeException e) {
+                Log.warn("Configured AuthMe AntiBot command failed", e);
+            }
         }
     }
 
-    private void scheduleCommand(ServerPlayer player, EventCommands.ConfiguredCommand command) {
+    private void scheduleCommand(ServerPlayer player, PlayerSession session,
+                                  EventCommands.ConfiguredCommand command) {
         String text = command.command().replace("%p", realName(player).toLowerCase(Locale.ROOT)).replace("%nick", realName(player)).replace("%ip", ip(player)).replace("%country", "");
         if (command.delayTicks() <= 0) executeEventCommand(player, command, text);
-        else scheduledCommands.add(new ScheduledCommand(tickCounter + command.delayTicks(), player, command, text));
+        else if (scheduledCommands.size() < MAX_SCHEDULED_COMMANDS) {
+            scheduledCommands.add(new ScheduledCommand(tickCounter + command.delayTicks(), player, session, command, text));
+        }
     }
 
     private void runScheduledCommands() {
         for (ScheduledCommand scheduled : scheduledCommands) {
             if (scheduled.dueTick() > tickCounter) continue;
             scheduledCommands.remove(scheduled);
-            if (!offline(scheduled.player())) executeEventCommand(scheduled.player(), scheduled.command(), scheduled.text());
+            boolean valid = scheduled.session() == null
+                ? !offline(scheduled.player())
+                : current(scheduled.player(), scheduled.session());
+            if (valid) executeEventCommand(scheduled.player(), scheduled.command(), scheduled.text());
         }
     }
 
@@ -1697,8 +2241,12 @@ public final class AuthManager {
         if (server == null) return;
         String commandText = text.startsWith("/") ? text.substring(1) : text;
         try {
-            if (command.executor() == EventCommands.Executor.PLAYER) server.getCommands().performPrefixedCommand(player.createCommandSourceStack(), commandText);
-            else server.getCommands().performPrefixedCommand(server.createCommandSourceStack().withSuppressedOutput(), commandText);
+            if (command.executor() == EventCommands.Executor.PLAYER) {
+                MinecraftCompat.performCommand(server.getCommands(), player.createCommandSourceStack(), commandText);
+            } else {
+                MinecraftCompat.performCommand(server.getCommands(),
+                    server.createCommandSourceStack().withSuppressedOutput(), commandText);
+            }
         } catch (RuntimeException e) { Log.error("Configured AuthMe event command failed: " + commandText, e); }
     }
 
@@ -1709,6 +2257,14 @@ public final class AuthManager {
         catch (RuntimeException e) { return name.matches("^[A-Za-z0-9_]+$"); }
     }
 
+    private boolean isUnrestrictedName(String lower) {
+        if (lower == null) return false;
+        for (String configured : cfg().unrestrictedNames()) {
+            if (configured != null && lower.equals(configured.trim().toLowerCase(Locale.ROOT))) return true;
+        }
+        return false;
+    }
+
     private boolean validPassword(String password) {
         if (password == null || password.length() < cfg().minPasswordLength()
             || password.length() > cfg().maxPasswordLength()
@@ -1717,8 +2273,24 @@ public final class AuthManager {
         catch (RuntimeException e) { return false; }
     }
 
+    private String displayEmail(String email) {
+        if (email == null || email.isBlank() || !cfg().emailMaskingEnabled()) return email == null ? "" : email;
+        int at = email.lastIndexOf('@');
+        if (at <= 0 || at >= email.length() - 1) return "***";
+        String local = email.substring(0, at);
+        String domain = email.substring(at + 1);
+        String localMasked = local.length() <= 2
+            ? local.substring(0, 1) + "***"
+            : local.charAt(0) + "***" + local.charAt(local.length() - 1);
+        int dot = domain.lastIndexOf('.');
+        String host = dot > 0 ? domain.substring(0, dot) : domain;
+        String suffix = dot > 0 ? domain.substring(dot) : "";
+        String hostMasked = host.isEmpty() ? "***" : host.charAt(0) + "***";
+        return localMasked + "@" + hostMasked + suffix;
+    }
+
     private boolean validEmailDomain(String email) {
-        if (email == null || !email.matches("^[^@\\s]+@[^@\\s]+\\.[^@\\s]+$")) return false;
+        if (!EmailAddressPolicy.isValid(email)) return false;
         String domain = email.substring(email.lastIndexOf('@') + 1).toLowerCase(Locale.ROOT);
         for (String blocked : cfg().emailBlacklist()) if (!blocked.isBlank() && domain.equalsIgnoreCase(blocked.trim())) return false;
         List<String> whitelist = cfg().emailWhitelist();
@@ -1763,7 +2335,7 @@ public final class AuthManager {
             other.pendingTotp = false;
             ServerPlayer previous = onlinePlayer(other.uuid);
             if (previous != null) { previous.setInvulnerable(true); kick(previous, auth.message("login.singleSession")); }
-            CompletableFuture.runAsync(() -> ds().setLoginFlags(lower, false, false));
+            // The replacement login fence invalidates the old connection without clearing itself.
         }
     }
 
@@ -1773,77 +2345,93 @@ public final class AuthManager {
                     || result.value().size() <= cfg().otherAccountsThreshold()) return;
             MinecraftText.send(player, auth.message("admin.otherAccounts", "accounts", String.join(", ", result.value())));
             String configured = cfg().otherAccountsCommand();
-            if (!configured.isBlank() && auth.server() != null) {
+            if (!configured.isBlank() && result.value().size() > cfg().otherAccountsCommandThreshold()
+                && auth.server() != null) {
                 String command = configured.replace("%playername%", realName(player))
                     .replace("%playerip%", ip(player)).replace("%p", realName(player))
                     .replace("%nick", realName(player)).replace("%ip", ip(player));
                 if (command.startsWith("/")) command = command.substring(1);
-                auth.server().getCommands().performPrefixedCommand(
+                MinecraftCompat.performCommand(auth.server().getCommands(),
                     auth.server().createCommandSourceStack().withSuppressedOutput(), command);
             }
         }));
     }
 
-    private synchronized int recordLoginFailure(String address) {
-        String key = normalizeIp(address);
+    private int recordLoginFailure(String playerName, String address) {
         long now = System.currentTimeMillis();
-        LoginFailure failure = loginFailures.computeIfAbsent(key, ignored -> new LoginFailure());
-        long resetMinutes = cfg().tempbanEnabled()
-            ? cfg().tempbanCounterResetMinutes() : cfg().captchaResetMinutes();
-        long window = Math.max(1L, resetMinutes) * 60_000L;
-        if (failure.windowStarted == 0L || now - failure.windowStarted > window) {
-            failure.windowStarted = now;
-            failure.attempts = 0;
-            failure.bannedUntil = 0L;
+        DataSource.FailureStateResult account = ds().recordFailureState(
+            accountFailureStateKey(playerName, address), now,
+            failureWindowMillis(), cfg().tempbanEnabled() ? cfg().tempbanMaxLoginTries() : 0,
+            Math.max(1L, cfg().tempbanLengthMinutes()) * 60_000L);
+        DataSource.FailureStateResult source = ds().recordFailureState(
+            sourceFailureStateKey(address), now,
+            failureWindowMillis(), cfg().tempbanEnabled() ? cfg().tempbanMaxLoginTries() : 0,
+            Math.max(1L, cfg().tempbanLengthMinutes()) * 60_000L);
+        if (!account.successful() || !source.successful()) return Integer.MAX_VALUE;
+        if (cfg().tempbanEnabled()
+            && (account.bannedUntil() > now || source.bannedUntil() > now)) {
+            return Math.max(account.attempts(), cfg().tempbanMaxLoginTries());
         }
-        return ++failure.attempts;
+        return account.attempts();
     }
 
-    private synchronized int failureAttempts(String address) {
-        String key = normalizeIp(address);
-        LoginFailure failure = loginFailures.get(key);
-        if (failure == null) return 0;
-        long resetMinutes = cfg().tempbanEnabled()
+    private long failureWindowMillis() {
+        long minutes = cfg().tempbanEnabled()
             ? cfg().tempbanCounterResetMinutes() : cfg().captchaResetMinutes();
-        if (System.currentTimeMillis() - failure.windowStarted > Math.max(1L, resetMinutes) * 60_000L) {
-            loginFailures.remove(key);
-            return 0;
-        }
-        return failure.attempts;
+        return Math.max(1L, minutes) * 60_000L;
     }
 
-    private synchronized void banIp(String address) {
-        LoginFailure failure = loginFailures.computeIfAbsent(normalizeIp(address), ignored -> new LoginFailure());
-        failure.bannedUntil = System.currentTimeMillis() + Math.max(1L, cfg().tempbanLengthMinutes()) * 60_000L;
+    private static String accountFailureStateKey(String playerName, String address) {
+        String normalizedName = playerName == null ? "unknown" : playerName.toLowerCase(Locale.ROOT);
+        return "auth|" + normalizedName + '|' + normalizeIp(address);
+    }
+
+    private static String sourceFailureStateKey(String address) {
+        return "ip|" + normalizeIp(address);
+    }
+
+    private synchronized void rememberUnsafeIpBlock(String key) {
+        if (key == null || key.isBlank()) return;
+        if (unsafeIpBlocks.size() >= MAX_UNSAFE_IP_BLOCKS && !unsafeIpBlocks.contains(key)) {
+            java.util.Iterator<String> iterator = unsafeIpBlocks.iterator();
+            if (iterator.hasNext()) unsafeIpBlocks.remove(iterator.next());
+        }
+        unsafeIpBlocks.add(key);
     }
 
     private void applyTempban(ServerPlayer player, String address) {
         String configured = cfg().tempbanCustomCommand();
-        if (configured == null || configured.isBlank()) { banIp(address); return; }
+        if (configured == null || configured.isBlank()) return;
         MinecraftServer server = auth.server();
-        if (server == null) { banIp(address); return; }
+        if (server == null) return;
         String command = configured.replace("%player%", realName(player)).replace("%p", realName(player))
             .replace("%nick", realName(player)).replace("%ip%", address == null ? "" : address)
             .replace("%ip", address == null ? "" : address);
         if (command.startsWith("/")) command = command.substring(1);
-        try { server.getCommands().performPrefixedCommand(server.createCommandSourceStack().withSuppressedOutput(), command); }
-        catch (RuntimeException e) { Log.error("Configured AuthMe tempban command failed; applying the internal safety ban", e); banIp(address); }
+        try { MinecraftCompat.performCommand(server.getCommands(),
+            server.createCommandSourceStack().withSuppressedOutput(), command); }
+        catch (RuntimeException e) { Log.error("Configured AuthMe tempban command failed; the shared internal ban remains active", e); }
     }
 
-    private synchronized boolean isTempBanned(String address) {
-        if (!cfg().tempbanEnabled()) return false;
-        String key = normalizeIp(address);
-        LoginFailure failure = loginFailures.get(key);
-        if (failure == null || failure.bannedUntil <= 0L) return false;
-        if (failure.bannedUntil <= System.currentTimeMillis()) {
-            loginFailures.remove(key);
-            return false;
+    private void clearLoginFailures(String playerName, String address) {
+        CompletableFuture.runAsync(() -> ds().clearFailureState(
+            accountFailureStateKey(playerName, address)));
+    }
+
+    private static void recordTotpFailure(PlayerSession session) {
+        if (session == null) return;
+        int attempts = ++session.totpAttempts;
+        if (attempts >= 5) {
+            long delay = Math.min(60_000L, 5_000L << Math.min(4, attempts - 5));
+            session.totpBlockedUntil = System.currentTimeMillis() + delay;
         }
-        return true;
     }
 
-    private synchronized void clearLoginFailures(String address) {
-        loginFailures.remove(normalizeIp(address));
+    private static void clearTotpFailures(PlayerSession session) {
+        if (session != null) {
+            session.totpAttempts = 0;
+            session.totpBlockedUntil = 0L;
+        }
     }
 
     private static String normalizeIp(String address) {
@@ -1888,23 +2476,29 @@ public final class AuthManager {
 
     private void completeLogin(ServerPlayer player, PlayerSession session, PlayerAuth authRow, Runnable onSuccess) {
         String lower = session.name;
+        long loginAt = System.currentTimeMillis();
         long generation = ++session.loginGeneration;
-        CompletableFuture.supplyAsync(() -> {
-            long now = System.currentTimeMillis();
-            return ds().setLoginState(lower, session.lastIp, now, cfg().sessionEnabled());
-        }).thenAccept(saved -> executeMain(() -> {
+        CompletableFuture.supplyAsync(() -> ds().acquireLoginState(lower, session.lastIp, loginAt,
+            cfg().sessionEnabled(), cfg().maxLoginPerIp())).thenAccept(acquired -> executeMain(() -> {
+            boolean saved = acquired.acquired();
+            clearAuthentication(session);
             boolean stillCurrent = session.active && session.loginGeneration == generation
                 && sessions.get(lower) == session && !offline(player);
             if (!saved || !stillCurrent) {
-                if (saved && !stillCurrent) CompletableFuture.runAsync(() -> ds().setLoginFlags(lower, false, false));
-                if (!saved && !offline(player)) failDatabase(player, session);
+                if (saved && !stillCurrent) CompletableFuture.runAsync(() -> ds().clearLoginIfLastLogin(lower, acquired.version()));
+                if (!saved && !offline(player)) {
+                    if (acquired.status() == DataSource.LoginStateStatus.LIMIT_REACHED) {
+                        MinecraftText.send(player, "Too many authenticated accounts from this address.");
+                    } else failDatabase(player, session);
+                }
                 return;
             }
             session.authenticated = true;
+            session.lastLogin = acquired.version();
             session.pendingTotp = false;
             JoinLeaveMessageBridge.onAuthenticated(player);
             applyConfiguredGameMode(player, true);
-            clearLoginFailures(session.lastIp);
+            clearLoginFailures(lower, session.lastIp);
             if (cfg().hideTablist()) showTabEntry(player);
             if (cfg().forceSingleSession()) enforceSingleSession(lower, session);
             String targetWorld = authRow.getLocWorld();
@@ -1922,9 +2516,9 @@ public final class AuthManager {
                 float pitch = authRow.getLocPitch();
                 if (y < 1.0) y = session.frozenY;
                 final double fy = y;
-                executeMain(() -> player.teleportTo(player.serverLevel(), x, fy, z, java.util.Set.of(), yaw, pitch));
+                executeMain(() -> MinecraftCompat.teleport(player, x, fy, z, yaw, pitch));
             }
-            player.setInvulnerable(false);
+            restoreLimbo(player, session);
             setBlindEffect(player, false);
             MinecraftText.send(player, auth.message("login.success"));
             sendWelcomeMessage(player, session);
@@ -1932,14 +2526,204 @@ public final class AuthManager {
             auth.emitProxyMessage(ProxyProtocol.LOGIN, lower);
             auth.connectPlayerToConfiguredServer(player);
             if (authRow.getLastLogin() == null || authRow.getLastLogin() <= 0L) runEventCommands("onFirstLogin", player);
-            if (cfg().displayOtherAccounts()) displayOtherAccounts(player, session.lastIp);
+            if (cfg().displayOtherAccounts()
+                && (hasAuthMePermission(player, "authme.admin.seeotheraccounts")
+                    || canSeeOwnAccounts(player))) {
+                displayOtherAccounts(player, session.lastIp);
+            }
             if (onSuccess != null) onSuccess.run();
         })).exceptionally(error -> { executeMain(() -> failDatabase(player, session)); return null; });
     }
 
+    /** Captures and applies the temporary unauthenticated-player sandbox. */
+    private void enterLimbo(ServerPlayer player, PlayerSession session) {
+        if (!cfg().restrictUnauthenticated()) return;
+        LimboStateStore.State persisted = limboStore.load(session.uuid);
+        if (persisted != null) {
+            session.originalOperator = persisted.operator();
+            session.originalMayFly = persisted.mayFly();
+            session.originalFlying = persisted.flying();
+            session.originalWalkingSpeed = persisted.walkingSpeed();
+            session.originalFlyingSpeed = persisted.flyingSpeed();
+            session.originalInvulnerable = persisted.invulnerable();
+        } else {
+            session.originalOperator = isOperator(player);
+            session.originalMayFly = player.getAbilities().mayfly;
+            session.originalFlying = player.getAbilities().flying;
+            session.originalWalkingSpeed = player.getAbilities().getWalkingSpeed();
+            session.originalFlyingSpeed = player.getAbilities().getFlyingSpeed();
+            session.originalInvulnerable = player.isInvulnerable();
+        }
+        session.limboCaptured = true;
+        limboStore.save(session.uuid, new LimboStateStore.State(session.originalOperator,
+            session.originalMayFly, session.originalFlying, session.originalWalkingSpeed,
+            session.originalFlyingSpeed, session.originalInvulnerable));
+        if (session.originalOperator) setOperator(player, false);
+        if (!"NOTHING".equals(cfg().limboRestoreAllowFlight())) {
+            player.getAbilities().mayfly = false;
+            player.getAbilities().flying = false;
+        }
+        if (!"NOTHING".equals(cfg().limboRestoreWalkSpeed())
+            || !"NOTHING".equals(cfg().limboRestoreFlySpeed())) {
+            player.getAbilities().setWalkingSpeed(0.0f);
+            player.getAbilities().setFlyingSpeed(0.0f);
+        }
+        notifyAbilities(player);
+        player.setInvulnerable(true);
+    }
+
+    private void applyPermissionGroup(ServerPlayer player, PlayerSession session) {
+        if (!cfg().groupOptionsEnabled() || player == null) return;
+        String group = session.registered ? cfg().registeredPlayerGroup() : cfg().unregisteredPlayerGroup();
+        if (group.isBlank()) return;
+        session.groupSnapshot = PermissionBridge.applyGroup(player.getUUID(), group);
+        if (PermissionBridge.providerPresent() && !session.groupSnapshot.applied()) {
+            Log.warn("Could not switch " + realName(player) + " to AuthMe group '" + group + "'.");
+        }
+    }
+
+    /** Restores all temporary limbo changes, including after an ordinary disconnect. */
+    private void restoreLimbo(ServerPlayer player, PlayerSession session) {
+        if (session == null) return;
+        if (session.groupSnapshot != null) {
+            if (!PermissionBridge.restoreGroup(session.uuid, session.groupSnapshot)) {
+                Log.warn("Could not restore the permission group for " + session.name);
+            }
+            session.groupSnapshot = null;
+        }
+        if (!session.limboCaptured || player == null) {
+            limboEnderPearls.remove(session.uuid);
+            return;
+        }
+        restoreLimboEnderPearls(player, session);
+        String allowFlight = cfg().limboRestoreAllowFlight();
+        if (!"NOTHING".equals(allowFlight)) {
+            boolean mayFly = switch (allowFlight) {
+                case "ENABLE" -> true;
+                case "DISABLE" -> false;
+                default -> session.originalMayFly;
+            };
+            player.getAbilities().mayfly = mayFly;
+            player.getAbilities().flying = mayFly && session.originalFlying;
+        }
+        player.getAbilities().setWalkingSpeed(restoreSpeed(cfg().limboRestoreWalkSpeed(),
+            session.originalWalkingSpeed, player.getAbilities().getWalkingSpeed(), 0.1f));
+        player.getAbilities().setFlyingSpeed(restoreSpeed(cfg().limboRestoreFlySpeed(),
+            session.originalFlyingSpeed, player.getAbilities().getFlyingSpeed(), 0.05f));
+        notifyAbilities(player);
+        setOperator(player, session.originalOperator);
+        player.setInvulnerable(session.originalInvulnerable);
+        limboStore.remove(session.uuid);
+        session.limboCaptured = false;
+    }
+
+    private void restoreLimboEnderPearls(ServerPlayer player, PlayerSession session) {
+        List<LimboEnderPearl> tracked = limboEnderPearls.remove(session.uuid);
+        if (tracked == null || tracked.isEmpty() || !session.authenticated
+            || !cfg().limboRecreateEnderPearls()) return;
+        ServerLevel level = MinecraftCompat.serverLevel(player);
+        for (LimboEnderPearl snapshot : tracked) {
+            if (!snapshot.entity().isRemoved() || snapshot.level() != level) continue;
+            try {
+                ThrownEnderpearl replacement = new ThrownEnderpearl(level, player);
+                replacement.setPos(snapshot.x(), snapshot.y(), snapshot.z());
+                replacement.setDeltaMovement(snapshot.velocity());
+                replacement.setYRot(snapshot.yaw());
+                replacement.setXRot(snapshot.pitch());
+                level.addFreshEntity(replacement);
+            } catch (RuntimeException error) {
+                Log.warn("Could not recreate an ender pearl for " + session.name, error);
+            }
+        }
+    }
+
+    private static float restoreSpeed(String mode, float original, float current, float defaultSpeed) {
+        return switch (mode) {
+            case "DEFAULT" -> defaultSpeed;
+            case "MAX_RESTORE" -> Math.max(current, original);
+            case "RESTORE_NO_ZERO" -> original == 0.0f ? defaultSpeed : original;
+            case "NOTHING" -> current;
+            default -> original;
+        };
+    }
+
+    private boolean isOperator(ServerPlayer player) {
+        if (player == null || auth.server() == null) return false;
+        try {
+            Object ops = auth.server().getPlayerList().getClass().getMethod("getOps")
+                .invoke(auth.server().getPlayerList());
+            Object profile = player.getGameProfile();
+            Object key = operatorKey(player);
+            Object entry = invokeOne(ops, "get", key);
+            if (entry == null && key != profile) entry = invokeOne(ops, "get", profile);
+            return entry != null;
+        } catch (ReflectiveOperationException | RuntimeException ignored) {
+            try {
+                return Boolean.TRUE.equals(player.getClass().getMethod("hasPermissions", int.class)
+                    .invoke(player, 2));
+            } catch (ReflectiveOperationException ignoredAgain) {
+                return false;
+            }
+        }
+    }
+
+    private void setOperator(ServerPlayer player, boolean operator) {
+        if (player == null || auth.server() == null) return;
+        try {
+            Object list = auth.server().getPlayerList();
+            Object profile = player.getGameProfile();
+            Object key = operatorKey(player);
+            java.lang.reflect.Method method = findOne(list, operator ? "op" : "deop", key);
+            Object argument = key;
+            if (method == null && key != profile) {
+                method = findOne(list, operator ? "op" : "deop", profile);
+                argument = profile;
+            }
+            if (method != null) method.invoke(list, argument);
+        } catch (ReflectiveOperationException | RuntimeException e) {
+            Log.warn("Could not restore AuthMe operator state for " + realName(player), e);
+        }
+    }
+
+    /** 1.21.x stores operator entries as NameAndId; older lines use GameProfile. */
+    private static Object operatorKey(ServerPlayer player) throws ReflectiveOperationException {
+        Object profile = player.getGameProfile();
+        try {
+            Class<?> nameAndId = Class.forName("net.minecraft.server.players.NameAndId");
+            return nameAndId.getConstructor(com.mojang.authlib.GameProfile.class).newInstance(profile);
+        } catch (ClassNotFoundException | NoSuchMethodException e) {
+            return profile;
+        }
+    }
+
+    private static Object invokeOne(Object target, String name, Object value)
+        throws ReflectiveOperationException {
+        if (target == null || value == null) return null;
+        java.lang.reflect.Method method = findOne(target, name, value);
+        return method == null ? null : method.invoke(target, value);
+    }
+
+    private static java.lang.reflect.Method findOne(Object target, String name, Object value) {
+        if (target == null || value == null) return null;
+        for (java.lang.reflect.Method method : target.getClass().getMethods()) {
+            if (method.getName().equals(name) && method.getParameterCount() == 1
+                && method.getParameterTypes()[0].isAssignableFrom(value.getClass())) return method;
+        }
+        return null;
+    }
+
+    private static void notifyAbilities(ServerPlayer player) {
+        try {
+            java.lang.reflect.Method method = player.getClass().getMethod("onUpdateAbilities");
+            method.invoke(player);
+        } catch (ReflectiveOperationException | RuntimeException ignored) {
+            // Ability fields are still updated locally on mappings without the helper method.
+        }
+    }
+
     private void kick(ServerPlayer player, String message) {
         try {
-            player.connection.disconnect(MinecraftText.toComponent(message));
+            player.connection.disconnect(MinecraftText.toComponent(player, message));
         } catch (Exception e) {
             Log.error("Failed to disconnect " + realName(player), e);
         }
@@ -1947,11 +2731,17 @@ public final class AuthManager {
 
     private void setBlindEffect(ServerPlayer player, boolean enabled) {
         if (player == null) return;
+        PlayerSession session = sessions.get(realName(player).toLowerCase(Locale.ROOT));
         if (enabled) {
-            if (!cfg().applyBlindEffect()) return;
-            player.addEffect(new MobEffectInstance(MobEffects.BLINDNESS, Integer.MAX_VALUE, 0, false, false, false));
+            if (!cfg().applyBlindEffect() || session == null || player.hasEffect(MobEffects.BLINDNESS)) return;
+            if (player.addEffect(new MobEffectInstance(MobEffects.BLINDNESS, Integer.MAX_VALUE, 0, false, false, false))) {
+                session.authMeBlindEffect = true;
+            }
         }
-        else player.removeEffect(MobEffects.BLINDNESS);
+        else if (session != null && session.authMeBlindEffect) {
+            player.removeEffect(MobEffects.BLINDNESS);
+            session.authMeBlindEffect = false;
+        }
     }
 
     private void sendWelcomeMessage(ServerPlayer player, PlayerSession session) {
@@ -1973,15 +2763,27 @@ public final class AuthManager {
         }
     }
 
+    public void disconnectAllForDatabaseFailure() {
+        for (PlayerSession current : sessions.values()) {
+            current.authenticated = false;
+            current.pendingTotp = false;
+            current.authenticationBusy = false;
+        }
+        MinecraftServer server = auth.server();
+        if (server == null) return;
+        for (ServerPlayer online : server.getPlayerList().getPlayers()) {
+            MinecraftText.send(online, auth.message("database.error"));
+            kick(online, auth.message("database.error"));
+        }
+    }
+
     private void failDatabase(ServerPlayer player, PlayerSession session) {
-        if (session != null) {
-            session.authenticated = false;
-            session.pendingTotp = false;
-        }
-        if (!offline(player)) {
-            MinecraftText.send(player, auth.message("database.error"));
-            kick(player, auth.message("database.error"));
-        }
+        // An old async callback must not fail closed for a newer connection.
+        if (!current(player, session)) return;
+        clearAuthentication(session);
+        session.authenticated = false;
+        session.pendingTotp = false;
+        auth.databaseFailure("a runtime authentication operation failed");
     }
 
     private void notifyDatabaseError(UUID uuid) {
@@ -1992,6 +2794,21 @@ public final class AuthManager {
 
     // ===================================================================== small helpers
 
+    /** Serialize authentication-changing commands while their database work is asynchronous. */
+    private boolean beginAuthentication(ServerPlayer player, PlayerSession session) {
+        if (session == null || !session.active) return false;
+        if (session.authenticationBusy) {
+            MinecraftText.send(player, auth.message("auth.pending"));
+            return false;
+        }
+        session.authenticationBusy = true;
+        return true;
+    }
+
+    private static void clearAuthentication(PlayerSession session) {
+        if (session != null) session.authenticationBusy = false;
+    }
+
     private <T> void executeMain(Runnable r) {
         MinecraftServer s = auth.server();
         if (s != null) s.execute(r);
@@ -1999,7 +2816,12 @@ public final class AuthManager {
     }
 
     private boolean offline(ServerPlayer p) {
-        return auth.server() == null || auth.server().getPlayerList().getPlayer(p.getUUID()) == null;
+        if (auth.server() == null || p == null) return true;
+        return auth.server().getPlayerList().getPlayer(p.getUUID()) != p;
+    }
+
+    private boolean current(ServerPlayer player, PlayerSession session) {
+        return session != null && session.active && sessions.get(session.name) == session && !offline(player);
     }
 
     private ServerPlayer onlinePlayer(UUID uuid) {
@@ -2027,10 +2849,33 @@ public final class AuthManager {
 
     private static String worldKey(ServerPlayer p) {
         try {
-            return p.level().dimension().location().toString();
+            return MinecraftCompat.serverLevel(p).dimension().location().toString();
         } catch (Exception e) {
             return "minecraft:overworld";
         }
+    }
+
+    private boolean hasAuthMePermission(ServerPlayer player, String node) {
+        if (player == null || node == null || node.isBlank()) return false;
+        if (player.hasPermissions(2)) return true;
+        if (!cfg().permissionCheckEnabled()) return false;
+        if (Boolean.TRUE.equals(PermissionBridge.check(player.getUUID(), node))) return true;
+        if (node.startsWith("authme.player.")
+            && Boolean.TRUE.equals(PermissionBridge.check(player.getUUID(), "authme.player.*"))) return true;
+        return node.startsWith("authme.admin.")
+            && Boolean.TRUE.equals(PermissionBridge.check(player.getUUID(), "authme.admin.*"));
+    }
+
+    /** VIP is intentionally a dedicated status node; operator/admin wildcards do not grant it. */
+    private boolean hasVipPermission(ServerPlayer player) {
+        return player != null && cfg().permissionCheckEnabled()
+            && Boolean.TRUE.equals(PermissionBridge.check(player.getUUID(), "authme.vip"));
+    }
+
+    private boolean canBeForced(PlayerSession session) {
+        if (session == null) return true;
+        ServerPlayer player = onlinePlayer(session.uuid);
+        return player == null || hasAuthMePermission(player, "authme.player.canbeforced");
     }
 
     private boolean countryAllowed(ServerPlayer player, String address) {

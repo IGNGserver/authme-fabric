@@ -1,5 +1,6 @@
 package io.github.authme.fabric.util;
 
+import io.github.authme.fabric.AuthMe;
 import net.minecraft.network.chat.Component;
 import net.minecraft.server.level.ServerPlayer;
 
@@ -19,9 +20,15 @@ public final class MinecraftText {
         return Component.literal(text == null ? "" : text.replace('&', SECTION));
     }
 
+    public static Component toComponent(ServerPlayer player, String text) {
+        AuthMe auth = AuthMe.get();
+        String resolved = auth == null ? text : auth.resolveMessage(player, text);
+        return toComponent(resolved);
+    }
+
     public static void send(ServerPlayer player, String text) {
         if (player != null && text != null && !text.isEmpty()) {
-            player.sendSystemMessage(toComponent(text));
+            player.sendSystemMessage(toComponent(player, text));
         }
     }
 
