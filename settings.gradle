@@ -14,6 +14,9 @@ include 'authme-core'
 include 'authme-fabric'
 include 'authme-fabric-mid'
 include 'authme-fabric-legacy'
-include 'authme-fabric-old'
-include 'authme-fabric-pre'
-include 'authme-fabric-older'
+// Legacy local-only variants: include them only when present in the working tree.
+['authme-fabric-old', 'authme-fabric-pre', 'authme-fabric-older'].each { dir ->
+    if (file(dir).exists()) {
+        include dir
+    }
+}
