@@ -25,6 +25,10 @@ import java.util.Locale;
  */
 public final class PasswordSecurity {
 
+    private static final int MAX_PASSWORD_INPUT_LENGTH = 256;
+    private static final int MAX_STORED_HASH_LENGTH = 4096;
+    private static final int MAX_STORED_SALT_LENGTH = 1024;
+
     private final EncryptionMethod primaryMethod;
     private final HashAlgorithm primaryAlgorithm;
     private final List<EncryptionMethod> legacyMethods;
@@ -67,6 +71,11 @@ public final class PasswordSecurity {
      */
     public VerificationResult verify(String password, HashedPassword hashedPassword, String name) {
         if (password == null || hashedPassword == null || hashedPassword.getHash() == null) {
+            return null;
+        }
+        if (password.length() > MAX_PASSWORD_INPUT_LENGTH
+            || hashedPassword.getHash().length() > MAX_STORED_HASH_LENGTH
+            || (hashedPassword.getSalt() != null && hashedPassword.getSalt().length() > MAX_STORED_SALT_LENGTH)) {
             return null;
         }
         if (safeCompare(primaryMethod, password, hashedPassword, name)) {

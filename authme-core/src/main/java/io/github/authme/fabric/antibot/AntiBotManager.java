@@ -24,6 +24,7 @@ public final class AntiBotManager {
     private long safetyBlockUntil;
     private long safetyBlockFrom;
     private int blockedSince;
+    private boolean deactivationNoticePending;
 
     public AntiBotManager(AuthMeConfig config) {
         this.enabled = config.antiBotEnabled();
@@ -41,13 +42,14 @@ public final class AntiBotManager {
         if (recentJoinTimes.size() >= thresholdConnections) {
             long blockMs = durationMinutes * 60_000L;
             long from = now + activationDelaySeconds * 1000L;
+            boolean alreadyScheduled = safetyBlockUntil > now;
             safetyBlockFrom = Math.max(safetyBlockFrom, from);
             safetyBlockUntil = Math.max(safetyBlockUntil, from + blockMs);
             blockedSince++;
             Log.warn("AntiBot: connection threshold reached (" + thresholdConnections
                 + " in " + intervalSeconds + "s). New joins will be temporarily blocked for "
                 + (blockMs / 1000) + "s after a " + activationDelaySeconds + "s delay. (ip=" + anonymizeIp(ip) + ")");
-            return true;
+            return !alreadyScheduled;
         }
         return false;
     }
@@ -58,10 +60,24 @@ public final class AntiBotManager {
     public synchronized boolean shouldBlockNewJoins() {
         if (!enabled) return false;
         long now = System.currentTimeMillis();
-        if (now < safetyBlockFrom || now >= safetyBlockUntil) {
+        if (safetyBlockUntil > 0L && now >= safetyBlockUntil) {
+            safetyBlockFrom = 0L;
+            safetyBlockUntil = 0L;
+            recentJoinTimes.clear();
+            deactivationNoticePending = true;
+            return false;
+        }
+        if (now < safetyBlockFrom || safetyBlockUntil <= 0L) {
             return false;
         }
         return true;
+    }
+
+    /** Returns and clears the one-shot notification emitted after an automatic safety window ends. */
+    public synchronized boolean consumeDeactivationNotice() {
+        boolean pending = deactivationNoticePending;
+        deactivationNoticePending = false;
+        return pending;
     }
 
     public synchronized int remainingBlockSeconds() {
@@ -79,6 +95,7 @@ public final class AntiBotManager {
         if (!enabled) {
             safetyBlockUntil = 0L;
             safetyBlockFrom = 0L;
+            deactivationNoticePending = false;
             recentJoinTimes.clear();
         }
         return changed;
@@ -93,6 +110,7 @@ public final class AntiBotManager {
         recentJoinTimes.clear();
         safetyBlockUntil = 0L;
         safetyBlockFrom = 0L;
+        deactivationNoticePending = false;
         blockedSince = 0;
     }
 

@@ -5,6 +5,7 @@ import java.security.InvalidKeyException;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.util.Arrays;
+import java.util.Locale;
 
 import javax.crypto.Mac;
 import javax.crypto.spec.SecretKeySpec;
@@ -17,6 +18,7 @@ public final class TotpProvider {
 
     private static final char[] ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567".toCharArray();
     private static final int[] DECODE = new int[128];
+    private static final int MAX_SECRET_LENGTH = 256;
 
     static {
         Arrays.fill(DECODE, -1);
@@ -41,7 +43,8 @@ public final class TotpProvider {
      */
     public static boolean isPlausibleSecret(String completeSecret) {
         if (completeSecret == null || completeSecret.length() < 2) return false;
-        String s = completeSecret.toUpperCase().replace(" ", "");
+        String s = completeSecret.toUpperCase(Locale.ROOT).replace(" ", "");
+        if (s.length() > MAX_SECRET_LENGTH) return false;
         for (int i = 0; i < s.length(); i++) {
             char c = s.charAt(i);
             if (c >= 128 || DECODE[c] < 0) return false;
@@ -53,9 +56,9 @@ public final class TotpProvider {
      * Validates a 6-digit code against {@code completeSecret} allowing a ±1 time window.
      */
     public static boolean validateCode(String completeSecret, String code) {
-        if (completeSecret == null || code == null) return false;
+        if (!isPlausibleSecret(completeSecret) || code == null) return false;
         String trimmed = code.trim();
-        if (trimmed.length() < 6) return false;
+        if (trimmed.length() != 6) return false;
         int entered;
         try {
             entered = Integer.parseInt(trimmed.substring(0, 6));
@@ -104,7 +107,11 @@ public final class TotpProvider {
     }
 
     public static byte[] base32Decode(String base32) {
-        String s = base32.toUpperCase().replace(" ", "").replace("=", "");
+        if (base32 == null) throw new IllegalArgumentException("TOTP secret is missing");
+        String s = base32.toUpperCase(Locale.ROOT).replace(" ", "").replace("=", "");
+        if (s.isEmpty() || s.length() > MAX_SECRET_LENGTH) {
+            throw new IllegalArgumentException("TOTP secret is too large");
+        }
         int outLen = s.length() * 5 / 8;
         byte[] out = new byte[outLen];
         int buffer = 0;

@@ -30,6 +30,11 @@ public class PostgreSqlDataSource extends AbstractSqlDataSource {
         super(settings);
     }
 
+    /** Opens an existing schema without issuing DDL. Use a SELECT-only database principal. */
+    public PostgreSqlDataSource(DbSettings settings, boolean readOnly) throws SQLException {
+        super(settings, !readOnly, null, !readOnly);
+    }
+
     @Override
     protected String driverClassName() {
         return "org.postgresql.Driver";
@@ -44,8 +49,17 @@ public class PostgreSqlDataSource extends AbstractSqlDataSource {
     protected String buildJdbcUrl() {
         StringBuilder u = new StringBuilder("jdbc:postgresql://")
             .append(settings.host).append(':').append(settings.port).append('/').append(settings.database);
-        u.append("?binaryTransfer=true");
+        u.append("?binaryTransfer=true&sslmode=").append(postgresSslMode(settings.tlsMode));
         return u.toString();
+    }
+
+    private static String postgresSslMode(DbSettings.TlsMode mode) {
+        return switch (mode) {
+            case DISABLED -> "disable";
+            case REQUIRED -> "require";
+            case VERIFY_CA -> "verify-ca";
+            case VERIFY_IDENTITY -> "verify-full";
+        };
     }
 
     @Override

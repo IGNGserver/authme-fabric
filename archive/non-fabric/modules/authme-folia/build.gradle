@@ -1,0 +1,46 @@
+plugins {
+    id 'java'
+}
+
+base {
+    archivesName = 'authme-folia'
+}
+
+java {
+    sourceCompatibility = JavaVersion.VERSION_21
+    targetCompatibility = JavaVersion.VERSION_21
+    withSourcesJar()
+}
+
+repositories {
+    maven {
+        url = 'https://repo.papermc.io/repository/maven-public/'
+        metadataSources {
+            mavenPom()
+            artifact()
+        }
+    }
+}
+
+dependencies {
+    implementation project(':authme-paper-common')
+    implementation project(':authme-platform-core')
+    compileOnly 'dev.folia:folia-api:1.21.11-R0.1-SNAPSHOT'
+}
+
+tasks.withType(JavaCompile).configureEach {
+    it.options.release = 21
+    it.options.encoding = 'UTF-8'
+}
+
+jar {
+    dependsOn configurations.runtimeClasspath
+    from {
+        configurations.runtimeClasspath.collect { it.isDirectory() ? it : zipTree(it) }
+    }
+    duplicatesStrategy = DuplicatesStrategy.EXCLUDE
+    exclude 'META-INF/*.SF', 'META-INF/*.DSA', 'META-INF/*.RSA', 'META-INF/*.MF'
+    from(rootProject.file('LICENSE')) {
+        rename { "${it}_authme-folia" }
+    }
+}

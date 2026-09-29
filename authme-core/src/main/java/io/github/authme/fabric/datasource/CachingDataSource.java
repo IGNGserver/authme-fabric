@@ -16,6 +16,8 @@ import java.util.concurrent.ConcurrentHashMap;
  */
 public final class CachingDataSource implements DataSource {
 
+    private static final int MAX_CACHE_ENTRIES = 16_384;
+
     private final DataSource source;
     private final long refreshMillis;
     private final long expireMillis;
@@ -33,6 +35,18 @@ public final class CachingDataSource implements DataSource {
     @Override
     public LookupResult lookupAuth(String user) {
         String key = key(user);
+        // Login/session/password decisions must observe changes made by another
+        // AuthMe instance immediately. The cache remains available through
+        // getAuth for non-security callers, but is never used by this result-
+        // preserving lookup path.
+        LookupResult result = source.lookupAuth(key);
+        if (result.successful()) store(key, result.auth(), System.currentTimeMillis());
+        return result;
+    }
+
+    /** Bounded cache lookup for callers that explicitly accept stale account data. */
+    public LookupResult lookupAuthCached(String user) {
+        String key = key(user);
         Entry entry = cache.get(key);
         long now = System.currentTimeMillis();
         if (entry != null && now - entry.createdAt <= refreshMillis) {
@@ -42,17 +56,17 @@ public final class CachingDataSource implements DataSource {
             return new LookupResult(entry.auth, true);
         }
         LookupResult result = source.lookupAuth(key);
-        if (result.successful()) cache.put(key, new Entry(result.auth(), now));
+        if (result.successful()) store(key, result.auth(), now);
         return result;
     }
 
     @Override
-    public PlayerAuth getAuth(String user) { return lookupAuth(user).auth(); }
+    public PlayerAuth getAuth(String user) { return lookupAuthCached(user).auth(); }
 
     @Override
     public PlayerAuth getAuthByEmail(String email) {
         PlayerAuth auth = source.getAuthByEmail(email);
-        if (auth != null) cache.put(key(auth.getName()), new Entry(auth, System.currentTimeMillis()));
+        if (auth != null) store(key(auth.getName()), auth, System.currentTimeMillis());
         return auth;
     }
 
@@ -67,12 +81,30 @@ public final class CachingDataSource implements DataSource {
 
     @Override public boolean saveAuth(PlayerAuth auth) { boolean ok = source.saveAuth(auth); if (ok) put(auth); return ok; }
     @Override public boolean updatePassword(String user, HashedPassword password) { return write(user, () -> source.updatePassword(user, password)); }
+    @Override public boolean updatePasswordIfMatches(String user, HashedPassword expected,
+                                                     HashedPassword replacement) {
+        return write(user, () -> source.updatePasswordIfMatches(user, expected, replacement));
+    }
+    @Override public boolean updatePasswordAndClearLogin(String user, HashedPassword password) {
+        return write(user, () -> source.updatePasswordAndClearLogin(user, password));
+    }
     @Override public boolean updateRealName(String user, String realName) { return write(user, () -> source.updateRealName(user, realName)); }
     @Override public boolean setLogged(String user, boolean logged) { return write(user, () -> source.setLogged(user, logged)); }
     @Override public boolean setSession(String user, boolean hasSession) { return write(user, () -> source.setSession(user, hasSession)); }
     @Override public boolean setLoginState(String user, String ip, long lastLogin, boolean hasSession) { return write(user, () -> source.setLoginState(user, ip, lastLogin, hasSession)); }
+    @Override public LoginStateResult acquireLoginState(String user, String ip, long requestedVersion,
+                                                        boolean hasSession, int maxLoggedPerIp) {
+        LoginStateResult result = source.acquireLoginState(user, ip, requestedVersion, hasSession, maxLoggedPerIp);
+        if (result.acquired()) invalidate(user);
+        return result;
+    }
+    @Override public LoginLeaseResult renewLoginLease(String user, long version, long now) {
+        return source.renewLoginLease(user, version, now);
+    }
     @Override public boolean setLoginFlags(String user, boolean logged, boolean hasSession) { return write(user, () -> source.setLoginFlags(user, logged, hasSession)); }
     @Override public boolean persistDisconnect(String user, long lastLogin, double x, double y, double z, float yaw, float pitch, String world, boolean saveLocation, boolean keepSession) { return write(user, () -> source.persistDisconnect(user, lastLogin, x, y, z, yaw, pitch, world, saveLocation, keepSession)); }
+    @Override public boolean persistDisconnectIfLastLogin(String user, long expectedLastLogin, long lastLogin, double x, double y, double z, float yaw, float pitch, String world, boolean saveLocation, boolean keepSession) { return write(user, () -> source.persistDisconnectIfLastLogin(user, expectedLastLogin, lastLogin, x, y, z, yaw, pitch, world, saveLocation, keepSession)); }
+    @Override public boolean clearLoginIfLastLogin(String user, long expectedLastLogin) { return write(user, () -> source.clearLoginIfLastLogin(user, expectedLastLogin)); }
     @Override public boolean updateIp(String user, String ip) { return write(user, () -> source.updateIp(user, ip)); }
     @Override public boolean updateLastLogin(String user, long lastLogin) { return write(user, () -> source.updateLastLogin(user, lastLogin)); }
     @Override public boolean updateEmail(String user, String email) { return write(user, () -> source.updateEmail(user, email)); }
@@ -93,6 +125,7 @@ public final class CachingDataSource implements DataSource {
     @Override public List<String> getRegisteredNames() { return source.getRegisteredNames(); }
     @Override public QueryResult<List<String>> queryRegisteredNamesByIp(String ip) { return source.queryRegisteredNamesByIp(ip); }
     @Override public CountResult countRegisteredByIp(String ip) { return source.countRegisteredByIp(ip); }
+    @Override public CountResult countLoggedByIp(String ip) { return source.countLoggedByIp(ip); }
     @Override public CountResult countRegisteredByEmail(String email) { return source.countRegisteredByEmail(email); }
     @Override public QueryResult<List<String>> queryPremiumUsernames() { return source.queryPremiumUsernames(); }
     @Override public QueryResult<List<PlayerAuth>> queryRecentAccounts(int limit) { return source.queryRecentAccounts(limit); }
@@ -106,6 +139,15 @@ public final class CachingDataSource implements DataSource {
     }
 
     @Override
+    public OperationResult removeAuthIfUnchanged(PlayerAuth expected, long cutoffMillis) {
+        OperationResult result = source.removeAuthIfUnchanged(expected, cutoffMillis);
+        if (result.successful() && result.affected() > 0 && expected != null) {
+            cache.remove(key(expected.getName()));
+        }
+        return result;
+    }
+
+    @Override
     public OperationResult clearLoggedFlags() {
         OperationResult result = source.clearLoggedFlags();
         if (result.successful()) cache.clear();
@@ -114,11 +156,27 @@ public final class CachingDataSource implements DataSource {
 
     @Override public List<String> getLoggedPlayersWithEmptyMail() { return source.getLoggedPlayersWithEmptyMail(); }
     @Override public boolean isLogged(String user) { return source.isLogged(user); }
+    @Override public CheckResult checkPremiumUsername(String user) { return source.checkPremiumUsername(user); }
+    @Override public FailureStateResult readFailureState(String key, long now, long windowMillis) {
+        return source.readFailureState(key, now, windowMillis);
+    }
+    @Override public FailureStateResult recordFailureState(String key, long now, long windowMillis,
+                                                           int banThreshold, long banMillis) {
+        return source.recordFailureState(key, now, windowMillis, banThreshold, banMillis);
+    }
+    @Override public boolean clearFailureState(String key) { return source.clearFailureState(key); }
     @Override public void reload() { cache.clear(); source.reload(); }
     @Override public void close() { cache.clear(); source.close(); }
     @Override public DataSourceType getType() { return source.getType(); }
     @Override public Columns getColumns() { return source.getColumns(); }
     @Override public boolean backup(Path destination) { return source.backup(destination); }
+
+    @Override
+    public MySqlDefinitionResult mysqlDefinition(MySqlDefinitionOperation operation, String column) {
+        MySqlDefinitionResult result = source.mysqlDefinition(operation, column);
+        if (result.successful() && operation != MySqlDefinitionOperation.DETAILS) cache.clear();
+        return result;
+    }
 
     private boolean write(String user, BooleanOperation operation) {
         boolean ok = operation.run();
@@ -127,7 +185,20 @@ public final class CachingDataSource implements DataSource {
     }
 
     private void put(PlayerAuth auth) {
-        if (auth != null && auth.getName() != null) cache.put(key(auth.getName()), new Entry(auth, System.currentTimeMillis()));
+        if (auth != null && auth.getName() != null) store(key(auth.getName()), auth, System.currentTimeMillis());
+    }
+
+    /** Keeps an operator-enabled cache from becoming an unbounded account-name memory sink. */
+    private void store(String key, PlayerAuth auth, long now) {
+        if (key == null || key.isEmpty()) return;
+        if (cache.size() >= MAX_CACHE_ENTRIES && !cache.containsKey(key)) {
+            purgeExpired();
+            if (cache.size() >= MAX_CACHE_ENTRIES) {
+                java.util.Iterator<String> iterator = cache.keySet().iterator();
+                if (iterator.hasNext()) cache.remove(iterator.next());
+            }
+        }
+        cache.put(key, new Entry(auth, now));
     }
 
     private void invalidate(String user) { if (user != null) cache.remove(key(user)); }

@@ -1,6 +1,7 @@
 package io.github.authme.fabric.mixin;
 
 import io.github.authme.fabric.network.JoinLeaveMessageBridge;
+import io.github.authme.fabric.util.MinecraftCompat;
 import net.minecraft.network.chat.Component;
 import net.minecraft.server.players.PlayerList;
 import org.spongepowered.asm.mixin.Mixin;
@@ -16,7 +17,7 @@ public abstract class JoinMessageMixin {
             "Lnet/minecraft/server/players/PlayerList;broadcastSystemMessage(Lnet/minecraft/network/chat/Component;Z)V"))
     private void authme$redirectJoin(PlayerList list, Component message, boolean overlay) {
         if (!JoinLeaveMessageBridge.shouldSuppressJoin()) {
-            list.broadcastSystemMessage(message, overlay);
+            MinecraftCompat.broadcastSystemMessage(list, message, overlay);
         }
     }
 }

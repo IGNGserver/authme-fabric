@@ -41,15 +41,21 @@ public enum HashAlgorithm {
     WORDPRESS,
     XFBCRYPT;
 
-    /** Parse the value as AuthMe does (case-insensitive), defaulting to SHA256. */
+    /**
+     * Parses a configured value as AuthMe does (case-insensitive).
+     *
+     * <p>Configuration errors must not silently select a weaker password algorithm, so missing
+     * values are handled by the configuration layer and invalid values fail closed here.</p>
+     */
     public static HashAlgorithm parse(String value) {
         if (value == null || value.isBlank()) {
-            return SHA256;
+            throw new IllegalArgumentException("Password hash algorithm must not be blank");
         }
         try {
             return HashAlgorithm.valueOf(value.trim().toUpperCase(java.util.Locale.ROOT).replace('-', '_'));
         } catch (IllegalArgumentException e) {
-            return SHA256;
+            throw new IllegalArgumentException("Unknown password hash algorithm '" + value
+                + "'; choose a supported HashAlgorithm value", e);
         }
     }
 }

@@ -4,9 +4,8 @@ plugins {
 }
 
 // Legacy coverage: pinned to Minecraft 1.20.4 (Java 17, ResourceLocation + hasPermission(int)).
-// Reliable runtime coverage is 1.19.4 through 1.20.4; 1.16.5 through 1.19.3 has more drastic
-// API surface drift (the pre-1.19 chat/Text API in particular) and is tracked as a follow-up
-// additional legacy module.
+// Reliable runtime coverage is 1.19.4 through 1.20.4; 1.19.3, 1.19.2 and 1.18.2 are isolated
+// in dedicated compatibility modules because their command/chat/packet APIs drift separately.
 base {
     archivesName = 'authme-fabric-legacy'
 }

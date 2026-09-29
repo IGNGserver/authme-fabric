@@ -36,7 +36,12 @@ public final class ProxyProtocol {
     private static final long MAX_AGE_MILLIS = 30_000L;
     private static final int MAX_PAYLOAD_BYTES = 32_767;
     private static final int MAX_STRING_BYTES = 32_767;
+    private static final int MAX_RECENT_PERFORM_LOGINS = 8192;
+    private static final int MAX_RECENT_PROXY_HANDSHAKES = 256;
+    private static final int MAX_RECENT_BACKEND_MESSAGES = 16_384;
     private static final ConcurrentHashMap<String, Long> RECENT_PERFORM_LOGINS = new ConcurrentHashMap<>();
+    private static final ConcurrentHashMap<String, Long> RECENT_PROXY_HANDSHAKES = new ConcurrentHashMap<>();
+    private static final ConcurrentHashMap<String, Long> RECENT_BACKEND_MESSAGES = new ConcurrentHashMap<>();
 
     private ProxyProtocol() {
     }
@@ -71,8 +76,58 @@ public final class ProxyProtocol {
             if (!isKnownType(type) || !validArgument(type, playerName)) return null;
             if (isPlayerArgument(type)) playerName = playerName.toLowerCase(java.util.Locale.ROOT);
 
+            // The external proxy bridge uses a signed proxy.started handshake for the
+            // premium snapshot request.  Keep accepting the historical unsigned
+            // two-string form for compatibility, but only the signed form is
+            // actionable on a backend receiving a client-forwarded payload.
+            if (PROXY_STARTED.equals(type) && in.available() > 0) {
+                if (sharedSecret == null || sharedSecret.isBlank()) return null;
+                long timestamp = in.readLong();
+                String hmac = readUtf(in, 256);
+                long now = System.currentTimeMillis();
+                if (!isSafeString(hmac) || timestamp < now - MAX_AGE_MILLIS
+                    || timestamp > now + MAX_AGE_MILLIS) return null;
+                String signed = playerName + ":" + timestamp;
+                if (!HashUtils.isEqual(HashUtils.hmacSha256(sharedSecret, signed), hmac)
+                    || in.available() != 0) return null;
+                String replayKey = playerName + ":" + timestamp + ":" + hmac;
+                RECENT_PROXY_HANDSHAKES.entrySet().removeIf(e -> now - e.getValue() > MAX_AGE_MILLIS);
+                if (RECENT_PROXY_HANDSHAKES.size() >= MAX_RECENT_PROXY_HANDSHAKES
+                    && !RECENT_PROXY_HANDSHAKES.containsKey(replayKey)) {
+                    java.util.Iterator<String> iterator = RECENT_PROXY_HANDSHAKES.keySet().iterator();
+                    if (iterator.hasNext()) RECENT_PROXY_HANDSHAKES.remove(iterator.next());
+                }
+                if (RECENT_PROXY_HANDSHAKES.putIfAbsent(replayKey, now) != null) return null;
+                return new Incoming(type, playerName, null, true, null);
+            }
+
+            if (isBackendNotificationType(type) && in.available() > 0) {
+                if (sharedSecret == null || sharedSecret.isBlank()) return null;
+                String backendId = readUtf(in, 128);
+                long timestamp = in.readLong();
+                String nonce = readUtf(in, 128);
+                String hmac = readUtf(in, 256);
+                long now = System.currentTimeMillis();
+                if (!isSafeBackendId(backendId) || !isSafeString(nonce) || !isSafeString(hmac)
+                    || timestamp < now - MAX_AGE_MILLIS || timestamp > now + MAX_AGE_MILLIS
+                    || in.available() != 0) return null;
+                String signed = backendSignature(backendId, type, playerName, timestamp, nonce);
+                if (!HashUtils.isEqual(HashUtils.hmacSha256(sharedSecret, signed), hmac)) return null;
+                String replayKey = backendId + ":" + type + ":" + playerName + ":"
+                    + timestamp + ":" + nonce + ":" + hmac;
+                RECENT_BACKEND_MESSAGES.entrySet().removeIf(e -> now - e.getValue() > MAX_AGE_MILLIS);
+                if (RECENT_BACKEND_MESSAGES.size() >= MAX_RECENT_BACKEND_MESSAGES
+                    && !RECENT_BACKEND_MESSAGES.containsKey(replayKey)) {
+                    java.util.Iterator<String> iterator = RECENT_BACKEND_MESSAGES.keySet().iterator();
+                    if (iterator.hasNext()) RECENT_BACKEND_MESSAGES.remove(iterator.next());
+                }
+                if (RECENT_BACKEND_MESSAGES.putIfAbsent(replayKey, now) != null) return null;
+                return new Incoming(type, playerName, null, true, backendId);
+            }
+
             if (!PERFORM_LOGIN.equals(type)) {
-                return new Incoming(type, playerName, null, false);
+                if (in.available() != 0) return null;
+                return new Incoming(type, playerName, null, false, null);
             }
             if (sharedSecret == null || sharedSecret.isBlank()) return null;
 
@@ -86,26 +141,35 @@ public final class ProxyProtocol {
                     hmac = readUtf(in, 256);
                 } catch (IllegalArgumentException ignored) {
                     // Backward-compatible form: the UUID field is omitted and
-                    // the third string is the HMAC.
+                    // this first string is the HMAC.
                 }
             } else {
                 hmac = readUtf(in, 256);
             }
-            if (!isSafeString(hmac) || Math.abs(System.currentTimeMillis() - timestamp) > MAX_AGE_MILLIS) {
+            long now = System.currentTimeMillis();
+            // Avoid Math.abs(long) overflow for attacker-controlled timestamps.  A signed
+            // timestamp is accepted only inside the bounded interval around the local clock.
+            if (!isSafeString(hmac) || timestamp < now - MAX_AGE_MILLIS
+                || timestamp > now + MAX_AGE_MILLIS) {
                 return null;
             }
             String signed = playerName + ":" + timestamp + ":" + (premiumUuid == null ? "" : premiumUuid);
             String expected = HashUtils.hmacSha256(sharedSecret, signed);
             if (!HashUtils.isEqual(expected, hmac)) return null;
+            if (in.available() != 0) return null;
 
             // Timestamped HMACs are already short-lived.  Remember the exact
             // signed message as well so a captured packet cannot be replayed
             // repeatedly during that 30-second window.
             String replayKey = playerName + ":" + timestamp + ":" + hmac;
-            long now = System.currentTimeMillis();
             RECENT_PERFORM_LOGINS.entrySet().removeIf(e -> now - e.getValue() > MAX_AGE_MILLIS);
+            if (RECENT_PERFORM_LOGINS.size() >= MAX_RECENT_PERFORM_LOGINS
+                && !RECENT_PERFORM_LOGINS.containsKey(replayKey)) {
+                java.util.Iterator<String> iterator = RECENT_PERFORM_LOGINS.keySet().iterator();
+                if (iterator.hasNext()) RECENT_PERFORM_LOGINS.remove(iterator.next());
+            }
             if (RECENT_PERFORM_LOGINS.putIfAbsent(replayKey, now) != null) return null;
-            return new Incoming(type, playerName, premiumUuid, true);
+            return new Incoming(type, playerName, premiumUuid, true, null);
         } catch (IllegalArgumentException | IOException e) {
             return null;
         }
@@ -131,6 +195,67 @@ public final class ProxyProtocol {
             return bytes.toByteArray();
         } catch (IOException e) {
             throw new IllegalStateException("Could not encode AuthMe perform.login message", e);
+        }
+    }
+
+    /**
+     * Encodes a backend-to-proxy state notification with an authenticated source id, timestamp and
+     * one-time nonce. Unsigned backend notifications are intentionally not accepted by the proxy
+     * decoder.
+     */
+    public static byte[] encodeSignedBackend(String secret, String backendId,
+                                             String type, String playerName) {
+        if (secret == null || secret.isBlank() || !isSafeBackendId(backendId)
+            || !isBackendNotificationType(type) || !validArgument(type, playerName)) {
+            throw new IllegalArgumentException("Backend proxy secret, identity and message are required");
+        }
+        String argument = isPlayerArgument(type)
+            ? playerName.toLowerCase(java.util.Locale.ROOT) : playerName;
+        long timestamp = System.currentTimeMillis();
+        String nonce = UUID.randomUUID().toString();
+        String hmac = HashUtils.hmacSha256(secret,
+            backendSignature(backendId, type, argument, timestamp, nonce));
+        try {
+            ByteArrayOutputStream bytes = new ByteArrayOutputStream(192);
+            DataOutputStream out = new DataOutputStream(bytes);
+            out.writeUTF(type);
+            out.writeUTF(argument);
+            out.writeUTF(backendId);
+            out.writeLong(timestamp);
+            out.writeUTF(nonce);
+            out.writeUTF(hmac);
+            out.flush();
+            return bytes.toByteArray();
+        } catch (IOException e) {
+            throw new IllegalStateException("Could not encode signed AuthMe backend message", e);
+        }
+    }
+
+    /** Parses and verifies a backend-to-proxy notification. */
+    public static Incoming parseBackend(byte[] payload, String sharedSecret) {
+        Incoming message = parse(payload, sharedSecret);
+        return message != null && message.verified() && isBackendNotificationType(message.type())
+            ? message : null;
+    }
+
+    /** Builds the authenticated proxy.started handshake used for premium snapshots. */
+    public static byte[] encodeSignedProxyStarted(String secret, String identity, long timestamp) {
+        if (secret == null || secret.isBlank() || !isProxyIdentity(identity)) {
+            throw new IllegalArgumentException("Proxy secret and identity are required");
+        }
+        String signed = identity + ":" + timestamp;
+        String hmac = HashUtils.hmacSha256(secret, signed);
+        try {
+            ByteArrayOutputStream bytes = new ByteArrayOutputStream(128);
+            DataOutputStream out = new DataOutputStream(bytes);
+            out.writeUTF(PROXY_STARTED);
+            out.writeUTF(identity);
+            out.writeLong(timestamp);
+            out.writeUTF(hmac);
+            out.flush();
+            return bytes.toByteArray();
+        } catch (IOException e) {
+            throw new IllegalStateException("Could not encode signed AuthMe proxy handshake", e);
         }
     }
 
@@ -183,6 +308,19 @@ public final class ProxyProtocol {
             || PREMIUM_LIST.equals(type) || PREMIUM_LIST_CHUNK.equals(type);
     }
 
+    private static boolean isBackendNotificationType(String type) {
+        return LOGIN.equals(type) || LOGOUT.equals(type) || PERFORM_LOGIN_ACK.equals(type)
+            || PREMIUM_SET.equals(type) || PREMIUM_PENDING_SET.equals(type)
+            || PREMIUM_UNSET.equals(type) || PREMIUM_LIST.equals(type)
+            || PREMIUM_LIST_CHUNK.equals(type);
+    }
+
+    private static String backendSignature(String backendId, String type, String playerName,
+                                           long timestamp, String nonce) {
+        return "authme-backend-v1|" + backendId + "|" + type + "|" + playerName
+            + "|" + timestamp + "|" + nonce;
+    }
+
     private static boolean validPremiumCsv(String csv) {
         if (csv == null || csv.isEmpty()) return true;
         for (String name : csv.split(",", -1)) if (!isSafePlayerName(name)) return false;
@@ -207,11 +345,16 @@ public final class ProxyProtocol {
                 || c >= 'A' && c <= 'Z' || c >= 'a' && c <= 'z');
     }
 
+    private static boolean isSafeBackendId(String value) {
+        return value != null && value.matches("[A-Za-z0-9_.-]{1,64}");
+    }
+
     private static boolean isSafeString(String value) {
         return value != null && !value.isEmpty() && value.length() <= MAX_STRING_BYTES
             && value.getBytes(StandardCharsets.UTF_8).length <= MAX_STRING_BYTES;
     }
 
-    public record Incoming(String type, String playerName, UUID premiumUuid, boolean verified) {
+    public record Incoming(String type, String playerName, UUID premiumUuid, boolean verified,
+                           String backendId) {
     }
 }

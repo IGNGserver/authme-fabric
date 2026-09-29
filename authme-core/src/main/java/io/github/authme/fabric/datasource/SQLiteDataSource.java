@@ -1,12 +1,18 @@
 package io.github.authme.fabric.datasource;
 
 import io.github.authme.fabric.util.Log;
+import io.github.authme.fabric.util.SecureFileAccess;
 
 import java.sql.Connection;
 import java.sql.DatabaseMetaData;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Statement;
+import java.io.IOException;
+import java.io.OutputStream;
+import java.nio.file.Files;
+import java.nio.file.LinkOption;
+import java.nio.file.Path;
 
 /**
  * SQLite data source. Creates the AuthMe-shaped SQLite table on first run. Because Fabric servers
@@ -18,8 +24,72 @@ import java.sql.Statement;
  */
 public class SQLiteDataSource extends AbstractSqlDataSource {
 
+    private final boolean readOnly;
+
     public SQLiteDataSource(DbSettings settings) throws SQLException {
-        super(settings);
+        this(settings, false);
+    }
+
+    /** Opens an existing SQLite file without schema creation or write access. */
+    public SQLiteDataSource(DbSettings settings, boolean readOnly) throws SQLException {
+        super(prepareSettings(settings, readOnly), !readOnly,
+            readOnly ? readOnlyJdbcUrl(settings) : null, !readOnly);
+        this.readOnly = readOnly;
+        try {
+            SecureFileAccess.harden(Path.of(settings.database).toAbsolutePath().normalize());
+        } catch (IOException | RuntimeException e) {
+            close();
+            throw new SQLException("Could not restrict SQLite database permissions", e);
+        }
+    }
+
+    @Override
+    public void reload() {
+        if (readOnly) {
+            Log.warn("Ignoring reload on a read-only SQLite data source");
+            return;
+        }
+        super.reload();
+    }
+
+    private static String readOnlyJdbcUrl(DbSettings settings) throws SQLException {
+        try {
+            Path path = Path.of(settings.database).toAbsolutePath().normalize();
+            if (!Files.isRegularFile(path, LinkOption.NOFOLLOW_LINKS)) {
+                throw new SQLException("Read-only SQLite source does not exist: " + path);
+            }
+            return "jdbc:sqlite:file:" + path.toString().replace('\\', '/') + "?mode=ro";
+        } catch (java.nio.file.InvalidPathException e) {
+            throw new SQLException("Invalid read-only SQLite source path", e);
+        }
+    }
+
+    private static DbSettings prepareSettings(DbSettings settings, boolean readOnly) throws SQLException {
+        if (settings == null || settings.database == null || settings.database.isBlank()) {
+            throw new SQLException("SQLite database path is missing");
+        }
+        try {
+            Path path = Path.of(settings.database).toAbsolutePath().normalize();
+            Path parent = path.getParent();
+            if (parent != null) Files.createDirectories(parent);
+            if (Files.exists(path, LinkOption.NOFOLLOW_LINKS)) {
+                SecureFileAccess.harden(path);
+                if (!Files.isRegularFile(path, LinkOption.NOFOLLOW_LINKS)) {
+                    throw new SQLException("SQLite database path is not a regular file: " + path);
+                }
+            } else if (readOnly) {
+                throw new SQLException("Read-only SQLite source does not exist: " + path);
+            } else {
+                // Create the database file privately before the JDBC driver opens it. Otherwise
+                // a permissive umask can expose a newly created database during schema setup.
+                try (OutputStream ignored = SecureFileAccess.createNewPrivateFile(path)) {
+                    // The SQLite driver will initialise this empty file on its first connection.
+                }
+            }
+            return settings;
+        } catch (IOException | RuntimeException e) {
+            throw new SQLException("Could not prepare SQLite database path", e);
+        }
     }
 
     @Override

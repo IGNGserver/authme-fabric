@@ -1,4 +1,4 @@
-// Root build script. Each subproject applies its own plugins (java / fabric-loom).
+// Root build script. Active subprojects are the Fabric mod lines and the pure-Java core.
 subprojects {
     version = rootProject.mod_version
     group = rootProject.maven_group

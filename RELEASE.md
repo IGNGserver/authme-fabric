@@ -22,7 +22,7 @@
 当前版本线：
 
 ```text
-6.0.1-fabric.1-SNAPSHOT
+6.0.1-fabric.2-SNAPSHOT
 ```
 
 其中：
@@ -50,7 +50,7 @@
 - 同一 `<上游版本>` 下，每次面向用户的新发布都递增 `fabric.N`，从 `1` 开始，不能复用已发布的序号。
 - 当项目改为对齐新的上游版本时，替换前三段上游版本号，并将 `N` 重置为 `1`。
 - `SNAPSHOT` 只能用于开发态。正式 tag、Release、jar 文件名和 `fabric.mod.json` 中都不能包含 `SNAPSHOT`。
-- 三个 Minecraft 覆盖模块共用同一个版本号；模块差异由 jar 名称和兼容的 Minecraft 范围表达，不再追加 `-mid` 或 `-legacy` 到版本号。
+- 六个 Minecraft 覆盖模块共用同一个版本号；模块差异由 jar 名称和兼容的 Minecraft 范围表达，不再追加 `-mid` 或 `-legacy` 到版本号。
 
 ## 为什么采用 `-fabric.N`
 
@@ -65,16 +65,16 @@
 版本唯一写在根目录的 [`gradle.properties`](gradle.properties) 的 `mod_version` 中：
 
 ```properties
-mod_version=6.0.1-fabric.1-SNAPSHOT
+mod_version=6.0.1-fabric.2-SNAPSHOT
 ```
 
-不要手动修改三个模块的 `fabric.mod.json` 版本字段；它们的 `${version}` 占位符会由 Gradle 构建时替换。启动日志和 `/authme version` 也必须从 Fabric Loader 的 mod metadata 读取版本，禁止再次写死版本号。
+不要手动修改六个模块的 `fabric.mod.json` 版本字段；它们的 `${version}` 占位符会由 Gradle 构建时替换。启动日志和 `/authme version` 也必须从 Fabric Loader 的 mod metadata 读取版本，禁止再次写死版本号。
 
 ## 正式发布流程
 
 1. 在 `gradle.properties` 中把 `mod_version` 从 `...-SNAPSHOT` 改为待发布的正式版本，例如 `6.0.1-fabric.1`。
 2. 更新 release notes，明确写出上游基线版本、Fabric 移植改动、兼容的 Minecraft 范围和数据库兼容性。
-3. 执行 `./gradlew clean build`，确认三个 jar、三个 `fabric.mod.json` 和 `/authme version` 显示完全一致的正式版本。
+3. 执行 `./gradlew clean build`，确认六个 jar、六个 `fabric.mod.json` 和 `/authme version` 显示完全一致的正式版本。
 4. 使用同一个版本创建 Git tag 和 Release：
 
    ```text
@@ -89,6 +89,9 @@ mod_version=6.0.1-fabric.1-SNAPSHOT
 authme-fabric-6.0.1-fabric.1.jar
 authme-fabric-mid-6.0.1-fabric.1.jar
 authme-fabric-legacy-6.0.1-fabric.1.jar
+authme-fabric-old-6.0.1-fabric.1.jar
+authme-fabric-pre-6.0.1-fabric.1.jar
+authme-fabric-older-6.0.1-fabric.1.jar
 ```
 
 ## 参考规范

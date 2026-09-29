@@ -18,6 +18,8 @@ import java.util.Map;
 /** Small atomic YAML store for the two AuthMe administrator spawn locations. */
 public final class SpawnStore {
 
+    private static final int MAX_YAML_CODE_POINTS = 64 * 1024;
+
     private final Path file;
     private final Map<String, Object> root = new LinkedHashMap<>();
 
@@ -56,7 +58,11 @@ public final class SpawnStore {
     private void load() {
         if (!Files.exists(file)) return;
         try (InputStream in = Files.newInputStream(file)) {
-            Object loaded = new Yaml(new SafeConstructor(new LoaderOptions())).load(in);
+            LoaderOptions options = new LoaderOptions();
+            options.setCodePointLimit(MAX_YAML_CODE_POINTS);
+            options.setMaxAliasesForCollections(8);
+            options.setNestingDepthLimit(16);
+            Object loaded = new Yaml(new SafeConstructor(options)).load(in);
             if (loaded instanceof Map<?, ?> map) {
                 for (Map.Entry<?, ?> entry : map.entrySet()) {
                     if (entry.getKey() != null) root.put(String.valueOf(entry.getKey()), entry.getValue());

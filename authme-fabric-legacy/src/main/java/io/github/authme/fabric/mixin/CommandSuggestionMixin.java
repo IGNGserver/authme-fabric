@@ -20,7 +20,8 @@ public abstract class CommandSuggestionMixin {
     @Inject(method = "handleCustomCommandSuggestions", at = @At("HEAD"), cancellable = true)
     private void authme$denyUnauthenticatedSuggestions(ServerboundCommandSuggestionPacket packet, CallbackInfo ci) {
         AuthMe am = AuthMe.get();
-        if (am != null && am.authManager() != null && am.config().denyTabCompleteBeforeLogin()
+        if (am != null && am.authManager() != null && am.config() != null
+            && am.config().denyTabCompleteBeforeLogin()
             && am.authManager().isUnauthenticated(getPlayer())) ci.cancel();
     }
 }

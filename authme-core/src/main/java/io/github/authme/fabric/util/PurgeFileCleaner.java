@@ -6,6 +6,7 @@ import io.github.authme.fabric.datasource.PlayerAuth;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
+import java.nio.file.LinkOption;
 import java.nio.file.Path;
 import java.util.List;
 import java.util.Locale;
@@ -90,8 +91,18 @@ public final class PurgeFileCleaner {
 
     private static boolean deleteExact(Path path, Path root) {
         try {
-            if (!path.startsWith(root) || !Files.isRegularFile(path)) return false;
-            return Files.deleteIfExists(path);
+            Path absoluteRoot = root.toAbsolutePath().normalize();
+            Path normalized = path.toAbsolutePath().normalize();
+            if (!normalized.startsWith(absoluteRoot)
+                || !Files.isRegularFile(normalized, LinkOption.NOFOLLOW_LINKS)) return false;
+
+            // A lexical startsWith check is not enough: a server-owned directory may be a
+            // symlink to a path outside the server root. Resolve the parent directory before
+            // deleting, and never follow a symlink at the final file component.
+            Path realRoot = absoluteRoot.toRealPath();
+            Path parent = normalized.getParent();
+            if (parent == null || !parent.toRealPath().startsWith(realRoot)) return false;
+            return Files.deleteIfExists(normalized);
         } catch (IOException e) {
             Log.warn("Could not remove purge file " + path + ": " + e.getMessage());
             return false;

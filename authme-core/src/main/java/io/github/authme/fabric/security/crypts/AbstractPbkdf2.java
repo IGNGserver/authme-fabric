@@ -13,6 +13,11 @@ import java.security.MessageDigest;
  */
 public abstract class AbstractPbkdf2 extends HexSaltedMethod {
 
+    /** Bounds for values parsed from a database hash; registration uses the configured values. */
+    private static final int MAX_VERIFICATION_ITERATIONS = 10_000_000;
+    private static final int MAX_SALT_BYTES = 1024;
+    private static final int MAX_KEY_BYTES = 1024;
+
     protected final int numberOfRounds;
 
     protected AbstractPbkdf2(int numberOfRounds) {
@@ -20,6 +25,11 @@ public abstract class AbstractPbkdf2 extends HexSaltedMethod {
     }
 
     protected byte[] deriveKey(String password, byte[] saltBytes, int iterations, int keyLength) {
+        if (password == null || saltBytes == null || saltBytes.length > MAX_SALT_BYTES
+            || iterations < 1 || iterations > MAX_VERIFICATION_ITERATIONS
+            || keyLength < 1 || keyLength > MAX_KEY_BYTES) {
+            throw new IllegalArgumentException("Unsafe PBKDF2 parameters");
+        }
         PKCS5S2ParametersGenerator gen = new PKCS5S2ParametersGenerator(new SHA256Digest());
         gen.init(password.getBytes(StandardCharsets.UTF_8), saltBytes, iterations);
         return ((KeyParameter) gen.generateDerivedMacParameters(keyLength * 8)).getKey();

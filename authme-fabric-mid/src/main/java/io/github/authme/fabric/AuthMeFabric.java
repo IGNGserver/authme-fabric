@@ -31,7 +31,7 @@ public final class AuthMeFabric implements ModInitializer {
         Log.setSink(new Log4jLogSink());
         AuthMe.require(); // create the singleton holder early
 
-        CommandRegistrationCallback.EVENT.register(AuthMeCommands::register);
+        CommandRegistrationCallback.EVENT.register((dispatcher, context, selection) -> AuthMeCommands.register(dispatcher));
         ProxyBridge.register();
         AuthMeEvents.register();
 

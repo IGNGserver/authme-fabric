@@ -7,6 +7,7 @@ import io.github.authme.fabric.config.RegisterSecondaryArgument;
 import io.github.authme.fabric.config.RegistrationType;
 import io.github.authme.fabric.security.HashAlgorithm;
 import io.github.authme.fabric.util.Log;
+import io.github.authme.fabric.util.SecureFileAccess;
 import org.yaml.snakeyaml.Yaml;
 import org.yaml.snakeyaml.constructor.SafeConstructor;
 import org.yaml.snakeyaml.LoaderOptions;
@@ -15,6 +16,7 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.nio.file.Files;
+import java.nio.file.LinkOption;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Collections;
@@ -39,22 +41,28 @@ public final class AuthMeConfig {
 
     public boolean load() {
         try {
-            Files.createDirectories(configDir);
+            SecureFileAccess.ensurePrivateDirectory(configDir);
             Path file = configDir.resolve("config.yml");
-            if (!Files.exists(file)) {
+            if (!Files.exists(file, LinkOption.NOFOLLOW_LINKS)) {
                 try (InputStream in = getClass().getResourceAsStream("/assets/authme/config.yml")) {
                     if (in == null) {
                         Log.error("Default config.yml missing from jar!");
                         return false;
                     }
-                    try (OutputStream out = Files.newOutputStream(file)) {
+                    try (OutputStream out = SecureFileAccess.createNewPrivateFile(file)) {
                         in.transferTo(out);
                     }
                     Log.info("Created default config.yml at " + file);
                 }
+            } else {
+                SecureFileAccess.harden(file);
             }
-            try (InputStream in = Files.newInputStream(file)) {
-                Yaml yaml = new Yaml(new SafeConstructor(new LoaderOptions()));
+            try (InputStream in = Files.newInputStream(file, LinkOption.NOFOLLOW_LINKS)) {
+                LoaderOptions options = new LoaderOptions();
+                options.setCodePointLimit(256 * 1024);
+                options.setMaxAliasesForCollections(16);
+                options.setNestingDepthLimit(32);
+                Yaml yaml = new Yaml(new SafeConstructor(options));
                 Object loaded = yaml.load(in);
                 if (!(loaded instanceof Map<?, ?> map)) {
                     Log.error("config.yml must contain a YAML mapping at its root");
@@ -93,9 +101,18 @@ public final class AuthMeConfig {
 
     public int getInt(String path, int def) {
         Object v = get(path);
-        if (v instanceof Number n) return n.intValue();
-        if (v instanceof String s) { try { return Integer.parseInt(s.trim()); } catch (NumberFormatException ignored) { } }
+        if (v instanceof Number n) return clampInt(n.longValue());
+        if (v instanceof String s) {
+            try { return clampInt(Long.parseLong(s.trim())); }
+            catch (NumberFormatException ignored) { }
+        }
         return def;
+    }
+
+    private static int clampInt(long value) {
+        if (value > Integer.MAX_VALUE) return Integer.MAX_VALUE;
+        if (value < Integer.MIN_VALUE) return Integer.MIN_VALUE;
+        return (int) value;
     }
 
     public boolean getBool(String path, boolean def) {
@@ -131,7 +148,12 @@ public final class AuthMeConfig {
 
     private int getIntAny(int def, String... paths) {
         Object value = getAny(paths);
-        if (value instanceof Number n) return n.intValue();
+        if (value instanceof Number n) {
+            long number = n.longValue();
+            if (number > Integer.MAX_VALUE) return Integer.MAX_VALUE;
+            if (number < Integer.MIN_VALUE) return Integer.MIN_VALUE;
+            return (int) number;
+        }
         if (value instanceof String s) {
             try { return Integer.parseInt(s.trim()); } catch (NumberFormatException ignored) { }
         }
@@ -168,8 +190,8 @@ public final class AuthMeConfig {
         try {
             return DataSourceType.valueOf(b);
         } catch (IllegalArgumentException e) {
-            Log.warn("Unknown DataSource.backend '" + b + "', defaulting to SQLITE");
-            return DataSourceType.SQLITE;
+            throw new IllegalArgumentException("Unknown DataSource.backend '" + b
+                + "'; choose SQLITE, MARIADB, MYSQL or POSTGRESQL", e);
         }
     }
 
@@ -210,6 +232,27 @@ public final class AuthMeConfig {
             database = configDir.resolve(name).toAbsolutePath().toString();
         }
 
+        boolean useSsl = getBoolAny(true, "DataSource.mySQLUseSSL", "DataSource.mysqlUseSSL");
+        boolean checkServerCertificate = getBoolAny(true,
+            "DataSource.mySQLCheckServerCertificate", "DataSource.mysqlCheckServerCertificate");
+        boolean allowPublicKeyRetrieval = getBoolAny(true,
+            "DataSource.mySQLAllowPublicKeyRetrieval", "DataSource.mysqlAllowPublicKeyRetrieval");
+        DbSettings.TlsMode tlsMode = tlsMode(useSsl, checkServerCertificate);
+        DbSettings.SchemaMode schemaMode;
+        String rawSchemaMode = getString("DataSource.schemaManagement", "AUTO")
+            .trim().toUpperCase(Locale.ROOT);
+        if (rawSchemaMode.equals("AUTO")) {
+            schemaMode = backend == DataSourceType.SQLITE
+                ? DbSettings.SchemaMode.MIGRATE : DbSettings.SchemaMode.VALIDATE;
+        } else {
+            try {
+                schemaMode = DbSettings.SchemaMode.valueOf(rawSchemaMode);
+            } catch (IllegalArgumentException exception) {
+                throw new IllegalArgumentException(
+                    "DataSource.schemaManagement must be AUTO, MIGRATE or VALIDATE", exception);
+            }
+        }
+
         return new DbSettings(
             backend,
             getString("DataSource.mySQLHost", "127.0.0.1"),
@@ -218,11 +261,13 @@ public final class AuthMeConfig {
             getString("DataSource.mySQLPassword", ""),
             database,
             getString("DataSource.mySQLTablename", "authme"),
-            Math.max(2, getInt("DataSource.poolSize", 10)),
-            getInt("DataSource.maxLifetime", 1800),
-            getBoolAny(true, "DataSource.mySQLUseSSL", "DataSource.mysqlUseSSL"),
-            getBoolAny(true, "DataSource.mySQLCheckServerCertificate", "DataSource.mysqlCheckServerCertificate"),
-            getBoolAny(true, "DataSource.mySQLAllowPublicKeyRetrieval", "DataSource.mysqlAllowPublicKeyRetrieval"),
+            Math.min(256, Math.max(2, getInt("DataSource.poolSize", 10))),
+            Math.min(86_400, Math.max(0, getInt("DataSource.maxLifetime", 1800))),
+            useSsl,
+            checkServerCertificate,
+            allowPublicKeyRetrieval,
+            tlsMode,
+            schemaMode,
             columns
         );
     }
@@ -230,8 +275,62 @@ public final class AuthMeConfig {
     // -------------------------------------------------------- security/registration/etc.
 
     public HashAlgorithm passwordHash() {
-        return HashAlgorithm.parse(getStringAny("SHA256",
-            "settings.security.passwordHash", "Security.passwordHash"));
+        Object value = getAny("settings.security.passwordHash", "Security.passwordHash");
+        return value == null ? HashAlgorithm.ARGON2ID : HashAlgorithm.parse(String.valueOf(value));
+    }
+
+    /** An explicit opt-in is required for legacy password algorithms as a primary algorithm. */
+    public boolean allowWeakPasswordHash() {
+        return getBoolAny(false, "settings.security.allowWeakPasswordHash",
+            "Security.allowWeakPasswordHash");
+    }
+
+    public boolean isWeakPrimaryPasswordHash() {
+        HashAlgorithm algorithm = passwordHash();
+        return switch (algorithm) {
+            case ARGON2, ARGON2ID, BCRYPT, BCRYPT2Y -> false;
+            case PBKDF2, PBKDF2BASE64 -> pbkdf2Rounds() < 100_000;
+            default -> true;
+        };
+    }
+
+    /** Validates security-sensitive configuration before a service opens a database. */
+    public void validateSecurityConfiguration() {
+        HashAlgorithm algorithm = passwordHash();
+        legacyHashes();
+        if (algorithm == HashAlgorithm.CUSTOM) {
+            throw new IllegalArgumentException("passwordHash=CUSTOM requires an external implementation");
+        }
+        if (isWeakPrimaryPasswordHash() && !allowWeakPasswordHash()) {
+            throw new IllegalArgumentException("Primary password hash " + algorithm
+                + " is legacy/weak; use ARGON2ID or explicitly set "
+                + "settings.security.allowWeakPasswordHash=true during migration");
+        }
+        if (bungeecordHook()) {
+            String secret = proxySharedSecret();
+            if (secret.length() < 16 || secret.length() > 256) {
+                throw new IllegalArgumentException(
+                    "Hooks.proxySharedSecret must contain between 16 and 256 characters when Hooks.bungeecord is enabled");
+            }
+            proxyBackendId();
+        }
+    }
+
+    private DbSettings.TlsMode tlsMode(boolean useSsl, boolean checkServerCertificate) {
+        Object explicit = getAny("DataSource.tlsMode", "DataSource.mysqlTlsMode",
+            "DataSource.mySQLTlsMode");
+        if (explicit == null) {
+            return !useSsl ? DbSettings.TlsMode.DISABLED
+                : checkServerCertificate ? DbSettings.TlsMode.VERIFY_IDENTITY : DbSettings.TlsMode.REQUIRED;
+        }
+        String value = String.valueOf(explicit).trim().toUpperCase(Locale.ROOT)
+            .replace('-', '_').replace(' ', '_');
+        try {
+            return DbSettings.TlsMode.valueOf(value);
+        } catch (IllegalArgumentException e) {
+            throw new IllegalArgumentException("Unknown DataSource.tlsMode '" + explicit
+                + "'; choose DISABLED, REQUIRED, VERIFY_CA or VERIFY_IDENTITY", e);
+        }
     }
 
     public List<HashAlgorithm> legacyHashes() {
@@ -243,13 +342,21 @@ public final class AuthMeConfig {
         return out;
     }
 
-    public int minPasswordLength() { return Math.max(1, getIntAny(5,
-        "settings.security.minPasswordLength", "Settings.restrictions.minPasswordLength")); }
-    public int maxPasswordLength() { return Math.max(minPasswordLength(), getIntAny(30,
-        "settings.security.passwordMaxLength", "Settings.restrictions.maxPasswordLength")); }
-    public int pbkdf2Rounds() { return getIntAny(10000, "settings.security.pbkdf2Rounds", "Security.pbkdf2Rounds"); }
-    public int bcryptLog2Round() { return getIntAny(10, "ExternalBoardOptions.bCryptLog2Round"); }
-    public int doubleMD5SaltLength() { return getIntAny(8, "settings.security.doubleMD5SaltLength"); }
+    public int minPasswordLength() { return Math.min(256, Math.max(1, getIntAny(5,
+        "settings.security.minPasswordLength", "Settings.restrictions.minPasswordLength"))); }
+    public int maxPasswordLength() { return Math.min(256, Math.max(minPasswordLength(), getIntAny(30,
+        "settings.security.passwordMaxLength", "Settings.restrictions.maxPasswordLength"))); }
+    public int pbkdf2Rounds() {
+        // Hash parameters come from local configuration, but an accidental or hostile value
+        // must not turn every registration/login into an unbounded CPU operation.
+        return Math.max(1, Math.min(10_000_000,
+            getIntAny(10000, "settings.security.pbkdf2Rounds", "Security.pbkdf2Rounds")));
+    }
+    public int bcryptLog2Round() { return Math.min(31, Math.max(4,
+        getIntAny(10, "ExternalBoardOptions.bCryptLog2Round"))); }
+    public int doubleMD5SaltLength() {
+        return Math.min(256, Math.max(1, getIntAny(8, "settings.security.doubleMD5SaltLength")));
+    }
     public List<String> unsafePasswords() {
         List<String> l = getAny("settings.security.unsafePasswords", "Settings.restrictions.unsafePasswords") == null
             ? List.of("123456", "password", "qwerty", "12345", "54321", "123456789", "help")
@@ -269,7 +376,8 @@ public final class AuthMeConfig {
         return getIntAny(5, "settings.security.captcha.maxLoginTry", "Security.captcha.maxLoginTry");
     }
     public int captchaLength() {
-        return getIntAny(5, "settings.security.captcha.captchaLength", "Security.captcha.captchaLength");
+        return Math.min(64, Math.max(3, getIntAny(5,
+            "settings.security.captcha.captchaLength", "Security.captcha.captchaLength")));
     }
     public int captchaResetMinutes() {
         return getIntAny(60, "settings.security.captcha.captchaCountReset", "Security.captcha.captchaCountReset");
@@ -382,9 +490,8 @@ public final class AuthMeConfig {
         "settings.messagesLanguage", "Settings.messagesLanguage", "settings.localization.language"); }
 
     /**
-     * Post-join dialog UI is only consumed by platform modules that have native dialog packets.
-     * AuthMeReloaded defaults this to enabled on supported server versions; modules without the
-     * native packet API simply fall back to the chat flow.
+     * Post-join dialog UI is consumed by the modern Fabric module. Older Fabric compatibility
+     * lines simply fall back to the chat flow.
      */
     public boolean dialogPostJoinEnabled() { return getBoolAny(true,
         "settings.registration.dialog.postJoin.enable", "settings.registration.useDialogUi",
@@ -397,31 +504,19 @@ public final class AuthMeConfig {
     public boolean dialogShowBody() { return getBoolAny(true,
         "settings.registration.dialog.showBody", "Settings.registration.dialog.showBody"); }
 
-    /** Paper/Folia-only upstream setting; retained for config compatibility and diagnostics. */
-    public boolean dialogPreJoinEnabled() { return getBoolAny(false,
-        "settings.registration.dialog.preJoin.enable", "settings.registration.usePreJoinDialogUi",
-        "Settings.registration.dialog.preJoin.enable"); }
-
-    public boolean dialogPreJoinShowCancelButton() { return getBoolAny(true,
-        "settings.registration.dialog.preJoin.showCancelButton"); }
-
-    public boolean dialogPreJoinAllowCloseWithEscape() { return getBoolAny(false,
-        "settings.registration.dialog.preJoin.allowCloseWithEscape"); }
-
-    public boolean dialogPreJoinRegisterCancelKicks() { return getBoolAny(false,
-        "settings.registration.dialog.preJoin.registerCancelKicks"); }
-
-    public boolean dialogPreJoinLoginCancelKicks() { return getBoolAny(true,
-        "settings.registration.dialog.preJoin.loginCancelKicks"); }
-
     public boolean sessionEnabled() { return getBoolAny(false,
         "settings.session.enabled", "settings.sessions.enabled"); }
     public int sessionTimeoutMinutes() { return Math.max(0, getIntAny(60,
         "settings.session.timeout", "settings.sessions.timeout")); }
-    public boolean sessionOnlyIp() { return getBoolAny(false,
+    /**
+     * Session resumption is always bound to the last authenticated IP. The
+     * legacy switches are still read for configuration compatibility, but a
+     * false value must never weaken authentication.
+     */
+    public boolean sessionOnlyIp() { return getBoolAny(true,
         "settings.session.sessionOnlyIp", "settings.sessions.sessionOnlyIp",
         "settings.session.sessionExpireOnIpChange", "settings.sessions.sessionExpireOnIpChange"); }
-    public boolean sessionExpireOnIpChange() { return getBoolAny(false,
+    public boolean sessionExpireOnIpChange() { return getBoolAny(true,
         "settings.session.sessionExpireOnIpChange", "settings.sessions.sessionExpireOnIpChange"); }
     public boolean forceSingleSession() { return getBoolAny(true,
         "settings.restrictions.forceSingleSession", "Settings.restrictions.ForceSingleSession"); }
@@ -430,6 +525,14 @@ public final class AuthMeConfig {
     public boolean bungeecordHook() { return getBoolAny(false, "Hooks.bungeecord", "Hooks.bungeecordHook"); }
 
     public String proxySharedSecret() { return getStringAny("", "Hooks.proxySharedSecret", "Hooks.proxySecret"); }
+    /** Stable source identity included in authenticated backend-to-proxy messages. */
+    public String proxyBackendId() {
+        String value = getStringAny("backend", "Hooks.proxyBackendId", "Hooks.proxyBackendID").trim();
+        if (!value.matches("[A-Za-z0-9_.-]{1,64}")) {
+            throw new IllegalArgumentException("Hooks.proxyBackendId must match [A-Za-z0-9_.-]{1,64}");
+        }
+        return value;
+    }
     public String bungeecordServer() { return getStringAny("", "Hooks.sendPlayerTo", "Hooks.bungeecordServer"); }
 
     public boolean dataSourceCaching() { return getBoolAny(true, "DataSource.caching", "DataSource.cacheEnabled"); }
@@ -478,11 +581,10 @@ public final class AuthMeConfig {
         "Settings.restrictUnauthenticated.denyTabCompleteBeforeLogin"); }
     public boolean removeSpeed() { return getBoolAny(false,
         "settings.restrictions.removeSpeed", "Settings.restrictions.removeSpeed"); }
-    public boolean displayOtherAccounts() { return getBoolAny(true,
+    public boolean displayOtherAccounts() { return getBoolAny(false,
         "settings.restrictions.displayOtherAccounts", "Settings.restrictions.displayOtherAccounts"); }
     public int otherAccountsThreshold() { return Math.max(0, getIntAny(0,
-        "settings.restrictions.otherAccountsThreshold", "settings.restrictions.otherAccountsCmdThreshold",
-        "Settings.restrictions.otherAccountsThreshold", "Settings.restrictions.otherAccountsCmdThreshold")); }
+        "settings.restrictions.otherAccountsThreshold", "Settings.restrictions.otherAccountsThreshold")); }
     public boolean banUnsafeIp() { return getBoolAny(false,
         "settings.restrictions.banUnsafedIP", "Settings.restrictions.banUnsafedIP"); }
     public boolean allowRestrictedUsers() { return getBoolAny(false,
@@ -491,6 +593,8 @@ public final class AuthMeConfig {
         "settings.restrictions.AllowedRestrictedUser", "Settings.restrictions.AllowedRestrictedUser"); }
     public List<String> unrestrictedNames() { return getStringListAny(
         "settings.unrestrictions.UnrestrictedName", "Settings.unrestrictions.UnrestrictedName"); }
+    public List<String> unrestrictedInventories() { return getStringListAny(
+        "settings.unrestrictions.UnrestrictedInventories", "Settings.unrestrictions.UnrestrictedInventories"); }
     public String otherAccountsCommand() { return getStringAny("",
         "settings.restrictions.otherAccountsCmd", "Settings.restrictions.otherAccountsCmd"); }
     public int otherAccountsCommandThreshold() { return Math.max(2, getIntAny(0,
@@ -505,7 +609,7 @@ public final class AuthMeConfig {
         return emailEnabled() && !emailUsername().isBlank() && !emailPassword().isBlank();
     }
     public String emailHost() { return getStringAny("127.0.0.1", "Email.host", "Email.mailSMTP"); }
-    public int emailPort() { return Math.max(1, getIntAny(25, "Email.port", "Email.mailPort")); }
+    public int emailPort() { return Math.min(65_535, Math.max(1, getIntAny(25, "Email.port", "Email.mailPort"))); }
     public String emailUsername() { return getStringAny("", "Email.username", "Email.mailAccount"); }
     public String emailPassword() { return getStringAny("", "Email.password", "Email.mailPassword"); }
     public String emailFrom() {
@@ -513,26 +617,85 @@ public final class AuthMeConfig {
         if (!configured.isEmpty()) return configured;
         return emailUsername();
     }
-    public boolean emailSsl() { return getBoolAny(false, "Email.ssl", "Email.sslCheckServerIdentity"); }
-    public boolean emailStartTls() { return getBoolAny(true, "Email.startTls"); }
+    /** Implicit TLS is selected automatically for AuthMe's standard port 465. */
+    public boolean emailSsl() {
+        Object explicit = getAny("Email.ssl", "settings.email.ssl");
+        return explicit == null ? emailPort() == 465 : getBoolAny(false, "Email.ssl", "settings.email.ssl");
+    }
+    /** Port 25 may opt out; ports 465 and 587 have fixed protocol semantics. */
+    public boolean emailStartTls() {
+        Object explicit = getAny("Email.startTls", "Email.useTls", "settings.email.startTls");
+        if (emailPort() == 465) return false;
+        if (emailPort() == 587) return true;
+        return explicit == null ? true : getBoolAny(true, "Email.startTls", "Email.useTls", "settings.email.startTls");
+    }
+    public boolean emailVerifyCertificate() { return getBoolAny(true,
+        "Email.sslCheckServerIdentity", "Email.verifyCertificate", "settings.email.verifyCertificate"); }
     public int emailTimeoutMillis() { return Math.max(1000, getIntAny(10000, "Email.timeoutMillis")); }
     public int emailGeneratedPasswordLength() {
-        return Math.max(1, getIntAny(8, "Email.RecoveryPasswordLength", "Email.recoveryPasswordLength",
-            "Email.generatedPasswordLength"));
+        return Math.min(256, Math.max(1, getIntAny(8, "Email.RecoveryPasswordLength", "Email.recoveryPasswordLength",
+            "Email.generatedPasswordLength")));
     }
     public int emailRecoveryTimeoutSeconds() {
         // AuthMeReloaded's legacy delayRecall is expressed in minutes; the
         // native compatibility key is expressed in seconds.
-        if (getAny("Email.recoveryTimeoutSeconds") != null) {
-            return Math.max(60, getIntAny(600, "Email.recoveryTimeoutSeconds"));
+        if (getAny("Security.recoveryCode.validForHours", "settings.recoveryCode.validForHours") != null) {
+            return minutesToSeconds(getIntAny(4, "Security.recoveryCode.validForHours",
+                "settings.recoveryCode.validForHours"), 3_600);
         }
-        return Math.max(60, getIntAny(10, "Email.delayRecall") * 60);
+        if (getAny("Email.recoveryTimeoutSeconds") != null) {
+            return boundedSeconds(getIntAny(600, "Email.recoveryTimeoutSeconds"));
+        }
+        return minutesToSeconds(getIntAny(10, "Email.delayRecall"), 60);
+    }
+    public int emailVerificationTimeoutSeconds() {
+        if (getAny("Email.verificationTimeoutSeconds", "settings.email.verificationTimeoutSeconds") != null) {
+            return Math.max(60, getIntAny(600, "Email.verificationTimeoutSeconds",
+                "settings.email.verificationTimeoutSeconds"));
+        }
+        if (getAny("Security.privacy.verificationCodeExpiration") != null) {
+            return minutesToSeconds(getIntAny(10, "Security.privacy.verificationCodeExpiration"), 60);
+        }
+        return emailRecoveryTimeoutSeconds();
+    }
+    public int emailRecoveryCooldownSeconds() {
+        return Math.max(1, getIntAny(60, "Email.recoveryCooldownSeconds",
+            "Email.emailRecoveryCooldown", "Security.emailRecovery.cooldown",
+            "settings.email.recoveryCooldownSeconds"));
+    }
+    public int emailRecoveryMaxAttempts() {
+        return Math.max(1, getIntAny(5, "Email.recoveryMaxAttempts",
+            "Security.recoveryCode.maxTries", "settings.recoveryCode.maxTries",
+            "settings.email.recoveryMaxAttempts"));
+    }
+    public int emailRecoveryCodeLength() {
+        return Math.max(4, Math.min(12, getIntAny(8, "Email.recoveryCodeLength",
+            "Security.recoveryCode.length", "settings.recoveryCode.length",
+            "settings.email.recoveryCodeLength")));
+    }
+    public int emailPasswordChangeTimeoutSeconds() {
+        if (getAny("Email.passwordChangeTimeoutSeconds") != null) {
+            return Math.max(60, getIntAny(120, "Email.passwordChangeTimeoutSeconds"));
+        }
+        return minutesToSeconds(getIntAny(2, "Security.recoveryCode.passwordChangeTimeout",
+            "settings.recoveryCode.passwordChangeTimeout"), 60);
     }
     public boolean emailRequireVerification() { return getBoolAny(false, "Email.requireVerification", "Email.requireEmail"); }
+    public boolean emailMaskingEnabled() { return getBoolAny(false,
+        "Security.privacy.enableEmailMasking", "Email.enableEmailMasking", "settings.email.enableEmailMasking"); }
     public String emailSenderName() { return getStringAny("AuthMe", "Email.senderName", "Email.mailSenderName"); }
     public String emailSubject() { return getStringAny("AuthMe", "Email.subject", "Email.mailSubject"); }
     public List<String> emailBlacklist() { return getStringListAny("Email.blacklistedDomains", "Email.emailBlacklisted"); }
     public List<String> emailWhitelist() { return getStringListAny("Email.whitelistedDomains", "Email.emailWhitelisted"); }
+
+    private static int boundedSeconds(int value) {
+        return Math.max(60, value);
+    }
+
+    private static int minutesToSeconds(int value, int multiplier) {
+        long seconds = Math.max(0L, (long) value) * Math.max(1L, multiplier);
+        return (int) Math.min(Integer.MAX_VALUE, Math.max(60L, seconds));
+    }
 
     private static boolean asBoolean(Object value) {
         if (value instanceof Boolean b) return b;
@@ -548,6 +711,13 @@ public final class AuthMeConfig {
     public int antiBotDelaySeconds() { return Math.max(0, getIntAny(60,
         "AntiBot.antibotDelay", "Protection.antiBotDelay")); }
     public List<String> antiBotCommands() { return getStringListAny("AntiBot.antibotCommands", "Protection.antiBotCommands"); }
+    /** AuthMe's post-join quick-command guard; zero disables it. */
+    public long quickCommandsDenyBeforeMilliseconds() {
+        return Math.max(0L, getIntAny(1000,
+            "Protection.quickCommands.denyCommandsBeforeMilliseconds",
+            "settings.protection.quickCommands.denyCommandsBeforeMilliseconds",
+            "QuickCommands.denyCommandsBeforeMilliseconds"));
+    }
 
     public boolean geoIpEnabled() { return getBoolAny(true, "Protection.geoIpDatabase.enabled", "Protection.geoIpEnabled"); }
     public boolean geoIpFailClosed() { return getBoolAny(false, "Protection.geoIpDatabase.failClosed", "Protection.geoIpFailClosed"); }
@@ -580,12 +750,42 @@ public final class AuthMeConfig {
     public boolean permissionCheckEnabled() { return getBoolAny(true,
         "settings.permission.EnablePermissionCheck", "Permission.EnablePermissionCheck",
         "Permission.enablePermissionCheck", "Settings.permission.EnablePermissionCheck"); }
+    public boolean groupOptionsEnabled() { return getBoolAny(false,
+        "GroupOptions.enablePermissionCheck", "settings.groupOptions.enablePermissionCheck",
+        "Settings.GroupOptions.enablePermissionCheck"); }
+    public String registeredPlayerGroup() { return getStringAny("",
+        "GroupOptions.registeredPlayerGroup", "settings.groupOptions.registeredPlayerGroup",
+        "Settings.GroupOptions.registeredPlayerGroup").trim(); }
+    public String unregisteredPlayerGroup() { return getStringAny("",
+        "GroupOptions.unregisteredPlayerGroup", "settings.groupOptions.unregisteredPlayerGroup",
+        "Settings.GroupOptions.unregisteredPlayerGroup").trim(); }
+    public boolean perPlayerLocale() { return getBoolAny(true,
+        "settings.perPlayerLocale", "settings.messagesPerPlayer", "settings.localization.perPlayer",
+        "Settings.perPlayerLocale", "Settings.messagesPerPlayer"); }
     public boolean forceSurvivalMode() { return getBoolAny(false,
         "settings.GameMode.ForceSurvivalMode", "Settings.GameMode.ForceSurvivalMode"); }
     public boolean forceSurvivalOnlyAfterLogin() { return getBoolAny(false,
         "settings.GameMode.ForceOnlyAfterLogin", "Settings.GameMode.ForceOnlyAfterLogin"); }
     public boolean resetInventoryIfCreative() { return getBoolAny(false,
         "settings.GameMode.ResetInventoryIfCreative", "Settings.GameMode.ResetInventoryIfCreative"); }
+    public String limboPersistence() { return getStringAny("INDIVIDUAL_FILES",
+        "settings.limbo.persistence.type", "Settings.limbo.persistence.type",
+        "limbo.persistence.type", "Limbo.persistence.type"); }
+    public String limboDistributionSize() { return getStringAny("SIXTEEN",
+        "settings.limbo.persistence.distributionSize", "Settings.limbo.persistence.distributionSize",
+        "limbo.persistence.distributionSize", "Limbo.persistence.distributionSize"); }
+    public String limboRestoreAllowFlight() { return getStringAny("RESTORE",
+        "settings.limbo.restoreAllowFlight", "Settings.limbo.restoreAllowFlight",
+        "limbo.restoreAllowFlight", "Limbo.restoreAllowFlight").trim().toUpperCase(Locale.ROOT); }
+    public String limboRestoreFlySpeed() { return getStringAny("RESTORE_NO_ZERO",
+        "settings.limbo.restoreFlySpeed", "Settings.limbo.restoreFlySpeed",
+        "limbo.restoreFlySpeed", "Limbo.restoreFlySpeed").trim().toUpperCase(Locale.ROOT); }
+    public String limboRestoreWalkSpeed() { return getStringAny("RESTORE_NO_ZERO",
+        "settings.limbo.restoreWalkSpeed", "Settings.limbo.restoreWalkSpeed",
+        "limbo.restoreWalkSpeed", "Limbo.restoreWalkSpeed").trim().toUpperCase(Locale.ROOT); }
+    public boolean limboRecreateEnderPearls() { return getBoolAny(true,
+        "settings.limbo.recreateEnderPearls", "Settings.limbo.recreateEnderPearls",
+        "limbo.recreateEnderPearls", "Limbo.recreateEnderPearls"); }
     public boolean restrictUnauthenticated() { return getBoolAny(true,
         "Settings.restrictUnauthenticated.enabled", "settings.restrictions.enableProtection"); }
     public List<String> allowedCommands() {
@@ -627,10 +827,16 @@ public final class AuthMeConfig {
     public Path configDir() { return configDir; }
 
     private void ensureWelcomeFile() {
-        if (Files.exists(welcomeFile())) return;
+        if (Files.exists(welcomeFile(), LinkOption.NOFOLLOW_LINKS)) {
+            try { SecureFileAccess.harden(welcomeFile()); }
+            catch (IOException | RuntimeException e) { Log.warn("Could not secure optional AuthMe welcome.txt", e); }
+            return;
+        }
         try (InputStream in = getClass().getResourceAsStream("/assets/authme/welcome.txt")) {
             if (in != null) {
-                Files.write(welcomeFile(), in.readAllBytes());
+                try (OutputStream out = SecureFileAccess.createNewPrivateFile(welcomeFile())) {
+                    out.write(in.readAllBytes());
+                }
             }
         } catch (IOException | RuntimeException e) {
             Log.warn("Could not create optional AuthMe welcome.txt", e);

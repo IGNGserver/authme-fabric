@@ -1,0 +1,40 @@
+plugins {
+    id 'java'
+}
+
+base {
+    archivesName = 'authme-bungee'
+}
+
+repositories {
+    maven { url = 'https://oss.sonatype.org/content/groups/public' }
+    maven { url = 'https://libraries.minecraft.net' }
+}
+
+dependencies {
+    compileOnly 'net.md-5:bungeecord-api:1.21-R0.4'
+    implementation project(':authme-proxy-core')
+}
+
+tasks.withType(JavaCompile).configureEach {
+    it.options.release = 21
+    it.options.encoding = 'UTF-8'
+}
+
+java {
+    sourceCompatibility = JavaVersion.VERSION_21
+    targetCompatibility = JavaVersion.VERSION_21
+    withSourcesJar()
+}
+
+jar {
+    dependsOn configurations.runtimeClasspath
+    from {
+        configurations.runtimeClasspath.collect { it.isDirectory() ? it : zipTree(it) }
+    }
+    duplicatesStrategy = DuplicatesStrategy.EXCLUDE
+    exclude 'META-INF/*.SF', 'META-INF/*.DSA', 'META-INF/*.RSA', 'META-INF/*.MF'
+    from(rootProject.file('LICENSE')) {
+        rename { "${it}_authme-bungee" }
+    }
+}
