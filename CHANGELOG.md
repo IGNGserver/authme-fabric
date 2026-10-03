@@ -1,6 +1,6 @@
 # Changelog
 
-## 6.0.1-fabric.2-SNAPSHOT
+## 6.0.1-fabric.2 — 2026-10-04
 
 - Aligned single session enforcement with upstream commit 87333db (case-insensitive name comparison across active sessions).
 - Added schema v3 with restart-safe version history, explicit MIGRATE/VALIDATE modes, remote
@@ -37,7 +37,7 @@ The historical multi-platform experiment snapshot is retained at
 [`archive/non-fabric/docs/CHANGELOG-before-fabric-only.md`](archive/non-fabric/docs/CHANGELOG-before-fabric-only.md)
 and is not part of the active Fabric release scope.
 
-## 6.0.1-fabric.2-SNAPSHOT — security hardening
+## 6.0.1-fabric.2 — security hardening
 
 ### 安全修复
 
