@@ -2425,7 +2425,7 @@ public final class AuthManager {
 
     private void enforceSingleSession(String lower, PlayerSession current) {
         for (PlayerSession other : sessions.values()) {
-            if (other == current || !other.authenticated || !other.name.equals(lower)) continue;
+            if (other == current || !other.authenticated || !other.name.equalsIgnoreCase(lower)) continue;
             other.authenticated = false;
             other.pendingTotp = false;
             ServerPlayer previous = onlinePlayer(other.uuid);
