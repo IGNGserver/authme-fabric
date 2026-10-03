@@ -10,13 +10,22 @@ active_modules=(
   authme-fabric
   authme-fabric-mid
   authme-fabric-legacy
+)
+
+optional_modules=(
   authme-fabric-old
   authme-fabric-pre
   authme-fabric-older
 )
 
-expected_includes=$'include \'authme-core\'\ninclude \'authme-fabric\'\ninclude \'authme-fabric-legacy\'\ninclude \'authme-fabric-mid\'\ninclude \'authme-fabric-old\'\ninclude \'authme-fabric-older\'\ninclude \'authme-fabric-pre\''
-actual_includes="$(rg '^include '\''[^'\'' ]+'\''' settings.gradle | sort)"
+for module in "${optional_modules[@]}"; do
+  if [[ -d "$module" ]]; then
+    active_modules+=("$module")
+  fi
+done
+
+expected_includes="$(printf "include '%s'\n" "${active_modules[@]}" | sort)"
+actual_includes="$(grep -E "^include '[^' ]+'" settings.gradle | sort)"
 if [[ "$actual_includes" != "$expected_includes" ]]; then
   printf '%s\n' 'Fabric scope check failed: settings.gradle includes unexpected projects.' >&2
   printf '%s\n' "$actual_includes" >&2
@@ -35,7 +44,7 @@ gradle_api_pattern='org\.spigotmc|org\.bukkit|io\.papermc|dev\.folia|com\.veloci
 package_pattern='^[[:space:]]*package[[:space:]]+io\.github\.authme\.(platform|proxy)\.'
 
 for pattern in "$java_api_pattern" "$gradle_api_pattern" "$package_pattern"; do
-  if matches="$(rg -n "$pattern" "${active_modules[@]}" --glob '*.java' --glob '*.gradle' 2>/dev/null || true)"; then
+  if matches="$(grep -RInE --include='*.java' --include='*.gradle' "$pattern" "${active_modules[@]}" 2>/dev/null || true)"; then
     if [[ -n "$matches" ]]; then
       printf '%s\n' 'Fabric scope check failed: non-Fabric API/package found in active modules.' >&2
       printf '%s\n' "$matches" >&2
