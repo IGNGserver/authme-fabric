@@ -2,6 +2,7 @@
 
 ## 6.0.1-fabric.2-SNAPSHOT
 
+- Aligned single session enforcement with upstream commit 87333db (case-insensitive name comparison across active sessions).
 - Added schema v3 with restart-safe version history, explicit MIGRATE/VALIDATE modes, remote
   migration locks, shared failure buckets and renewable fenced login leases for cross-instance
   single-session/IP-quota enforcement and crash recovery.
